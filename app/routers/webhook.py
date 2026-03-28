@@ -1,6 +1,6 @@
 import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Header
-from app.models.schemas import InstantlyWebhookPayload
+from app.models.schemas import InstantlyWebhookPayload, ProspectData
 from app.services.icp import generate_icp
 from app.services.apollo import search_leads, leads_to_csv
 from app.services.composer import compose_email_body
@@ -11,9 +11,9 @@ from app.config import settings
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# All reply event types Instantly may send
-POSITIVE_EVENTS = {"reply.positive", "reply", "email_reply"}
-ANY_REPLY_EVENTS = {"reply.positive", "reply", "email_reply", "reply.negative", "reply.all"}
+POSITIVE_EVENTS  = {"reply.positive", "lead_interested"}
+ANY_REPLY_EVENTS = {"reply.positive", "reply", "email_reply",
+                    "lead_interested", "reply.negative", "reply.all"}
 
 
 def verify_webhook_secret(x_instantly_secret: str | None):
@@ -22,81 +22,68 @@ def verify_webhook_secret(x_instantly_secret: str | None):
 
 
 async def stop_sequence_if_active(prospect_email: str) -> bool:
-    """
-    Check if this prospect is enrolled in a sequence.
-    If yes, stop it immediately and advance their deal to 'replied'.
-
-    Returns True if a sequence was stopped.
-    """
     all_deals = await db.list_deals()
-
-    # Find any deal for this email address that has an active sequence
     matching = [
         d for d in all_deals
         if d.get("email", "").lower() == prospect_email.lower()
         and d.get("seq_active")
     ]
-
-    if not matching:
-        return False
-
     for deal in matching:
-        deal_id = deal["id"]
-        await db.stop_sequence(deal_id, reason="prospect_replied")
-        await db.advance_deal_stage(deal_id, "replied")
-        logger.info(
-            "Sequence stopped for %s (deal %s) — prospect replied",
-            prospect_email, deal_id,
-        )
-
-    return True
+        await db.stop_sequence(deal["id"], reason="prospect_replied")
+        await db.advance_deal_stage(deal["id"], "replied")
+        logger.info("Sequence stopped for %s", prospect_email)
+    return bool(matching)
 
 
 async def run_full_pipeline(payload: InstantlyWebhookPayload):
     """
-    Full automated pipeline — fires for POSITIVE replies from new prospects.
-
-    AUTO mode  → ICP → Apollo → Email sent → CRM = delivered
-    REVIEW mode → ICP → Apollo → CRM = pending_review (awaits approval)
+    Full automated pipeline triggered by Instantly.ai webhook.
+    Uses the normalised helper methods on the payload to handle
+    Instantly's flat field format.
     """
-    prospect = payload.prospect
-    reply    = payload.reply_body or ""
+    prospect = payload.to_prospect_data()
+    reply    = payload.get_reply()
 
     logger.info("=== Pipeline start: %s <%s> ===", prospect.company, prospect.email)
 
+    # Stage 1 — create CRM deal
     deal = await db.create_deal(
         name       = prospect.name,
         email      = prospect.email,
         company    = prospect.company,
         domain     = prospect.domain or "",
-        campaign   = payload.campaign or "",
+        campaign   = payload.campaign_name or payload.campaign or "",
         reply_body = reply,
     )
     deal_id = deal["id"]
     run_id  = await db.start_pipeline_run(deal_id)
 
-    # ICP generation
+    # Stage 2 — ICP generation
     await db.update_pipeline_run(run_id, stage="icp_generation")
     try:
         icp = await generate_icp(prospect, reply)
         await db.set_deal_icp(deal_id, icp.model_dump())
         await db.advance_deal_stage(deal_id, "icp")
+        logger.info("ICP done: %s / %s", icp.industry, icp.sub_niche)
     except Exception as exc:
         logger.exception("ICP failed for %s", deal_id)
         await db.finish_pipeline_run(run_id, status="failed", error=str(exc))
         return
 
-    # Apollo search
+    # Stage 3 — Apollo lead search
     await db.update_pipeline_run(run_id, stage="apollo_search")
     try:
         leads = await search_leads(icp, limit=100)
         if leads:
             await db.save_leads(deal_id, run_id, leads)
+            logger.info("%d leads saved", len(leads))
+        else:
+            logger.warning("Apollo returned 0 leads for %s", deal_id)
     except Exception as exc:
         logger.exception("Apollo failed for %s", deal_id)
         leads = []
 
-    # Send or hold
+    # Stage 4 — send or hold for review
     if settings.review_mode:
         await db.advance_deal_stage(deal_id, "pending_review")
         await db.update_pipeline_run(run_id, stage="awaiting_review", status="paused")
@@ -107,7 +94,6 @@ async def run_full_pipeline(payload: InstantlyWebhookPayload):
 
 
 async def _send_leads_email(deal_id, run_id, prospect, icp, leads):
-    """Send the lead delivery email and mark deal as delivered."""
     await db.update_pipeline_run(run_id, stage="email_delivery")
     try:
         approved_leads = await db.get_leads_for_deal(deal_id, approved_only=True)
@@ -150,45 +136,41 @@ async def receive_instantly_webhook(
     x_instantly_secret: str | None = Header(default=None),
 ):
     """
-    Receives ALL reply events from Instantly.ai.
-
-    If the prospect is already in the CRM with an active sequence,
-    the sequence is stopped immediately regardless of event type.
-
-    If it's a positive reply from a new prospect, the full pipeline runs.
+    Receives webhook events from Instantly.ai.
+    Handles Instantly's actual flat payload format.
     """
     verify_webhook_secret(x_instantly_secret)
 
-    prospect_email = payload.prospect.email
-    event          = payload.event or ""
+    prospect_email = payload.get_prospect_email()
+    event          = payload.get_event()
 
-    # ── Step 1: Always check if this prospect has an active sequence ──────────
-    # Any reply at all — positive, negative, or neutral — stops the sequence.
+    logger.info("Webhook received: event=%s email=%s", event, prospect_email)
+
+    # Stop any active sequence for this prospect on any reply
     sequence_stopped = False
     if event in ANY_REPLY_EVENTS:
         sequence_stopped = await stop_sequence_if_active(prospect_email)
-        if sequence_stopped:
-            logger.info(
-                "Reply received from %s — sequence stopped (event: %s)",
-                prospect_email, event,
-            )
 
-    # ── Step 2: Only run the full pipeline for positive replies ───────────────
+    # Only run full pipeline for positive/interested replies
     if event not in POSITIVE_EVENTS:
         return {
             "received":         True,
             "processed":        False,
             "sequence_stopped": sequence_stopped,
-            "reason":           "not a positive reply — sequence stopped if active",
+            "reason":           f"event '{event}' is not a positive reply",
         }
 
-    # Positive reply → run pipeline in background
+    if not prospect_email:
+        raise HTTPException(status_code=422, detail="No email address in payload")
+
     background_tasks.add_task(run_full_pipeline, payload)
-    logger.info("Pipeline queued for %s", prospect_email)
+    logger.info("Pipeline queued for %s <%s>", payload.get_company(), prospect_email)
+
     return {
         "received":    True,
         "processed":   True,
         "prospect":    prospect_email,
-        "company":     payload.prospect.company,
+        "company":     payload.get_company(),
+        "event":       event,
         "review_mode": settings.review_mode,
     }
