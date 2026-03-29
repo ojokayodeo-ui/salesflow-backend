@@ -2,17 +2,9 @@
 Database Layer — SQLite via aiosqlite
 
 Tables:
-  deals         — one CRM card per prospect
+  deals         — one CRM card per prospect, includes full respondent profile
   pipeline_runs — audit log of every pipeline execution
-  leads         — 100 Apollo leads per run, with per-lead approval status
-
-Sequence fields on deals:
-  seq_active    — 1 if currently enrolled in a sequence
-  seq_id        — which sequence (stored as text ID matching frontend)
-  seq_step      — which step they're currently on (1-based)
-  seq_started   — ISO timestamp when sequence started
-  seq_stopped   — ISO timestamp when sequence was stopped (reply received)
-  seq_stop_reason — why it stopped: 'prospect_replied' | 'completed' | 'manual'
+  leads         — 100 Apollo leads per run
 """
 
 import json
@@ -30,14 +22,30 @@ CREATE TABLE IF NOT EXISTS deals (
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL,
     stage           TEXT NOT NULL DEFAULT 'new',
+    -- Basic info
     name            TEXT NOT NULL,
     email           TEXT NOT NULL,
     company         TEXT NOT NULL,
     domain          TEXT,
     campaign        TEXT,
     reply_body      TEXT,
+    -- Full respondent profile from Instantly
+    job_title       TEXT,
+    job_level       TEXT,
+    department      TEXT,
+    linkedin        TEXT,
+    location        TEXT,
+    headcount       TEXT,
+    industry        TEXT,
+    sub_industry    TEXT,
+    company_website TEXT,
+    company_desc    TEXT,
+    headline        TEXT,
+    reply_subject   TEXT,
+    -- ICP and pipeline
     icp_json        TEXT,
     history_json    TEXT NOT NULL DEFAULT '[]',
+    -- Sequence tracking
     seq_active      INTEGER NOT NULL DEFAULT 0,
     seq_id          TEXT,
     seq_step        INTEGER DEFAULT 1,
@@ -77,6 +85,31 @@ CREATE TABLE IF NOT EXISTS leads (
     FOREIGN KEY (deal_id) REFERENCES deals(id)
 )"""
 
+CREATE_SCHEDULED_EMAILS = """
+CREATE TABLE IF NOT EXISTS scheduled_emails (
+    id          TEXT PRIMARY KEY,
+    deal_id     TEXT NOT NULL,
+    seq_id      TEXT NOT NULL,
+    step_index  INTEGER NOT NULL,
+    step_subject TEXT NOT NULL,
+    step_body   TEXT NOT NULL,
+    send_at     TEXT NOT NULL,  -- ISO datetime UTC when to send
+    timezone    TEXT NOT NULL DEFAULT 'Europe/London',
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending|sent|failed|cancelled
+    sent_at     TEXT,
+    error       TEXT,
+    created_at  TEXT NOT NULL,
+    FOREIGN KEY (deal_id) REFERENCES deals(id)
+)"""
+
+
+
+PROSPECT_COLS = [
+    "job_title","job_level","department","linkedin","location",
+    "headcount","industry","sub_industry","company_website",
+    "company_desc","headline","reply_subject",
+]
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -91,37 +124,47 @@ async def init_db():
         await db.execute(CREATE_DEALS)
         await db.execute(CREATE_PIPELINE_RUNS)
         await db.execute(CREATE_LEADS)
-        # Add sequence columns if upgrading from older schema
-        for col, defn in [
-            ("seq_active",      "INTEGER NOT NULL DEFAULT 0"),
-            ("seq_id",          "TEXT"),
-            ("seq_step",        "INTEGER DEFAULT 1"),
-            ("seq_started",     "TEXT"),
-            ("seq_stopped",     "TEXT"),
-            ("seq_stop_reason", "TEXT"),
-        ]:
+        await db.execute(CREATE_SCHEDULED_EMAILS)
+        # Add new columns if upgrading from older schema
+        all_new_cols = PROSPECT_COLS + [
+            "seq_active","seq_id","seq_step","seq_started","seq_stopped","seq_stop_reason"
+        ]
+        for col in all_new_cols:
             try:
+                defn = "INTEGER NOT NULL DEFAULT 0" if col == "seq_active" else "TEXT"
                 await db.execute(f"ALTER TABLE deals ADD COLUMN {col} {defn}")
             except Exception:
-                pass  # column already exists
+                pass
         await db.commit()
     logger.info("Database ready at %s", DB_PATH.resolve())
 
 
 # ── Deals ──────────────────────────────────────────────────────────────────
 
-async def create_deal(name, email, company, domain="", campaign="", reply_body="") -> dict:
+async def create_deal(
+    name: str, email: str, company: str,
+    domain: str = "", campaign: str = "", reply_body: str = "",
+    # Full respondent profile
+    job_title: str = "", job_level: str = "", department: str = "",
+    linkedin: str = "", location: str = "", headcount: str = "",
+    industry: str = "", sub_industry: str = "", company_website: str = "",
+    company_desc: str = "", headline: str = "", reply_subject: str = "",
+) -> dict:
     deal_id = new_id()
     ts = now_iso()
     history = json.dumps([{"from": None, "to": "new", "ts": ts}])
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """INSERT INTO deals
-               (id,created_at,updated_at,stage,name,email,company,
-                domain,campaign,reply_body,history_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-            (deal_id, ts, ts, "new", name, email, company,
-             domain, campaign, reply_body, history),
+               (id,created_at,updated_at,stage,name,email,company,domain,campaign,
+                reply_body,job_title,job_level,department,linkedin,location,headcount,
+                industry,sub_industry,company_website,company_desc,headline,reply_subject,
+                history_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (deal_id, ts, ts, "new", name, email, company, domain, campaign,
+             reply_body, job_title, job_level, department, linkedin, location, headcount,
+             industry, sub_industry, company_website, company_desc, headline, reply_subject,
+             history),
         )
         await db.commit()
     return await get_deal(deal_id)
@@ -170,16 +213,15 @@ async def set_deal_icp(deal_id: str, icp: dict):
 
 def _deal_row(row) -> dict:
     d = dict(row)
-    d["history"]   = json.loads(d.pop("history_json", "[]"))
-    d["icp"]       = json.loads(d["icp_json"]) if d.get("icp_json") else None
+    d["history"]    = json.loads(d.pop("history_json", "[]"))
+    d["icp"]        = json.loads(d["icp_json"]) if d.get("icp_json") else None
     d["seq_active"] = bool(d.get("seq_active", 0))
     return d
 
 
-# ── Sequence management ────────────────────────────────────────────────────
+# ── Sequence management ─────────────────────────────────────────────────────
 
 async def start_sequence(deal_id: str, seq_id: str, step: int = 1):
-    """Enrol a deal in a sequence."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """UPDATE deals
@@ -189,11 +231,9 @@ async def start_sequence(deal_id: str, seq_id: str, step: int = 1):
             (seq_id, step, now_iso(), now_iso(), deal_id),
         )
         await db.commit()
-    logger.info("Deal %s enrolled in sequence %s at step %d", deal_id, seq_id, step)
 
 
 async def advance_sequence_step(deal_id: str) -> int:
-    """Move deal to next sequence step. Returns new step number."""
     deal = await get_deal(deal_id)
     if not deal:
         return 0
@@ -208,14 +248,6 @@ async def advance_sequence_step(deal_id: str) -> int:
 
 
 async def stop_sequence(deal_id: str, reason: str = "manual"):
-    """
-    Stop the sequence for a deal.
-
-    reason options:
-      'prospect_replied' — they replied to an email (automatic)
-      'completed'        — all steps sent
-      'manual'           — you stopped it manually
-    """
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """UPDATE deals
@@ -224,11 +256,9 @@ async def stop_sequence(deal_id: str, reason: str = "manual"):
             (now_iso(), reason, now_iso(), deal_id),
         )
         await db.commit()
-    logger.info("Sequence stopped for deal %s — reason: %s", deal_id, reason)
 
 
 async def get_active_sequences() -> list[dict]:
-    """Return all deals with an active sequence."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -238,7 +268,7 @@ async def get_active_sequences() -> list[dict]:
     return [_deal_row(r) for r in rows]
 
 
-# ── Pipeline runs ──────────────────────────────────────────────────────────
+# ── Pipeline runs ───────────────────────────────────────────────────────────
 
 async def start_pipeline_run(deal_id: str) -> str:
     run_id = new_id()
@@ -269,7 +299,7 @@ async def finish_pipeline_run(run_id: str, status: str = "complete", error: str 
         await db.commit()
 
 
-# ── Leads ──────────────────────────────────────────────────────────────────
+# ── Leads ───────────────────────────────────────────────────────────────────
 
 async def save_leads(deal_id: str, run_id: str, leads: list[dict]):
     ts = now_iso()
@@ -316,3 +346,78 @@ async def bulk_set_lead_approval(deal_id: str, approved_ids: list[int]):
                 (deal_id, *approved_ids),
             )
         await db.commit()
+
+
+# ── Scheduled emails ─────────────────────────────────────────────────────────
+
+async def schedule_email(
+    deal_id: str, seq_id: str, step_index: int,
+    subject: str, body: str, send_at_utc: str,
+    timezone: str = "Europe/London",
+) -> str:
+    """Schedule an email to be sent at a specific UTC datetime."""
+    email_id = new_id()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO scheduled_emails
+               (id,deal_id,seq_id,step_index,step_subject,step_body,
+                send_at,timezone,status,created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (email_id, deal_id, seq_id, step_index, subject, body,
+             send_at_utc, timezone, "pending", now_iso()),
+        )
+        await db.commit()
+    logger.info("Scheduled email %s for deal %s at %s", email_id, deal_id, send_at_utc)
+    return email_id
+
+
+async def get_due_emails() -> list[dict]:
+    """Return all pending emails whose send_at time has passed."""
+    now = now_iso()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM scheduled_emails WHERE status='pending' AND send_at <= ? ORDER BY send_at",
+            (now,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+async def mark_email_sent(email_id: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE scheduled_emails SET status='sent', sent_at=? WHERE id=?",
+            (now_iso(), email_id),
+        )
+        await db.commit()
+
+
+async def mark_email_failed(email_id: str, error: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE scheduled_emails SET status='failed', error=? WHERE id=?",
+            (error, email_id),
+        )
+        await db.commit()
+
+
+async def cancel_scheduled_emails(deal_id: str):
+    """Cancel all pending scheduled emails for a deal (e.g. when sequence stops)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE scheduled_emails SET status='cancelled' WHERE deal_id=? AND status='pending'",
+            (deal_id,),
+        )
+        await db.commit()
+
+
+async def get_scheduled_emails_for_deal(deal_id: str) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM scheduled_emails WHERE deal_id=? ORDER BY send_at",
+            (deal_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [dict(r) for r in rows]
