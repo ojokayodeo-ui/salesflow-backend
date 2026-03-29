@@ -7,7 +7,7 @@ Instantly.ai positive reply
   → /api/webhook/instantly
   → ICP generation (Claude)
   → Apollo filter config
-  → Delivery email (Microsoft Outlook via Graph API)
+  → Delivery  email (Microsoft Outlook via Graph API)
 ```
 
 ---
