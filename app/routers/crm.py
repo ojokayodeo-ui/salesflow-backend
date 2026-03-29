@@ -285,3 +285,76 @@ async def get_active_sequences():
     """Return all deals with an active sequence — for the Active Sequences tab."""
     enrolled = await db.get_active_sequences()
     return {"enrolled": enrolled, "count": len(enrolled)}
+
+
+# ── Email scheduling endpoints ──────────────────────────────────────────────
+
+@router.post("/deals/{deal_id}/sequence/schedule")
+async def schedule_sequence_emails(deal_id: str, body: dict):
+    """
+    Schedule all remaining emails in a sequence for a deal.
+    
+    Body: {
+        "seq_steps": [{"subject":"...","body":"...","delay":0}, ...],
+        "seq_id": "abc",
+        "send_time": "09:00",
+        "timezone": "Europe/London",
+        "allowed_days": ["mon","tue","wed","thu","fri"],
+        "current_step": 0
+    }
+    """
+    from app.services.scheduler import calculate_send_at
+    from app.services.database import schedule_email, cancel_scheduled_emails
+    import pytz
+    from datetime import datetime
+
+    deal = await db.get_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+
+    steps       = body.get("seq_steps", [])
+    seq_id      = body.get("seq_id", "")
+    send_time   = body.get("send_time", "09:00")
+    tz_str      = body.get("timezone", "Europe/London")
+    allowed     = body.get("allowed_days", ["mon","tue","wed","thu","fri"])
+    start_step  = int(body.get("current_step", 0))
+
+    # Cancel any existing scheduled emails for this deal
+    await cancel_scheduled_emails(deal_id)
+
+    now_utc = datetime.now(pytz.UTC)
+    scheduled = []
+
+    for i, step in enumerate(steps):
+        if i < start_step:
+            continue  # already sent
+        delay = int(step.get("delay", 0))
+        send_at = calculate_send_at(now_utc, delay, send_time, tz_str, allowed)
+        email_id = await schedule_email(
+            deal_id     = deal_id,
+            seq_id      = seq_id,
+            step_index  = i,
+            subject     = step.get("subject", ""),
+            body        = step.get("body", ""),
+            send_at_utc = send_at.isoformat(),
+            timezone    = tz_str,
+        )
+        scheduled.append({"step": i+1, "subject": step.get("subject",""), "send_at": send_at.isoformat(), "id": email_id})
+
+    return {"scheduled": scheduled, "count": len(scheduled)}
+
+
+@router.get("/deals/{deal_id}/scheduled-emails")
+async def get_scheduled_emails(deal_id: str):
+    """Return all scheduled emails for a deal."""
+    from app.services.database import get_scheduled_emails_for_deal
+    emails = await get_scheduled_emails_for_deal(deal_id)
+    return {"deal_id": deal_id, "emails": emails, "count": len(emails)}
+
+
+@router.delete("/deals/{deal_id}/scheduled-emails")
+async def cancel_all_scheduled(deal_id: str):
+    """Cancel all pending scheduled emails for a deal."""
+    from app.services.database import cancel_scheduled_emails
+    await cancel_scheduled_emails(deal_id)
+    return {"cancelled": True, "deal_id": deal_id}
