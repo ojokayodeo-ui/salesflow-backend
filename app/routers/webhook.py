@@ -2,6 +2,8 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Header
 from app.models.schemas import InstantlyWebhookPayload
 from app.services.icp import generate_icp_segments
+from app.services.sentiment import score_reply
+from app.services.instantly import get_lead_by_email, extract_prospect_data
 from app.services.composer import compose_email_body
 from app.services.outlook import send_email_via_outlook
 from app.services import database as db
@@ -57,6 +59,37 @@ async def run_full_pipeline(payload: InstantlyWebhookPayload):
         else:
             prospect.name = "Unknown Prospect"
 
+    # Enrich prospect data from Instantly API
+    email = prospect.email or payload.get_prospect_email()
+    if email:
+        try:
+            lead_data = await get_lead_by_email(email)
+            if lead_data:
+                enriched = extract_prospect_data(lead_data, payload)
+                # Update prospect with full data
+                from app.models.schemas import ProspectData
+                prospect = ProspectData(
+                    name        = enriched["name"],
+                    email       = email,
+                    company     = enriched["company"] or prospect.company,
+                    domain      = enriched["domain"] or prospect.domain,
+                    website     = enriched["website"] or prospect.website,
+                    job_title   = enriched["job_title"],
+                    job_level   = enriched["job_level"],
+                    linkedin    = enriched["linkedin"],
+                    location    = enriched["location"],
+                    headcount   = enriched["headcount"],
+                    industry    = enriched["industry"],
+                    sub_industry= enriched["sub_industry"],
+                    description = enriched["description"],
+                    headline    = enriched["headline"],
+                    department  = enriched["department"],
+                )
+                logger.info("Enriched prospect: %s at %s (%s)", 
+                           prospect.name, prospect.company, prospect.job_title)
+        except Exception as exc:
+            logger.warning("Instantly enrichment failed: %s", exc)
+
     logger.info("=== Pipeline start: %s <%s> ===", prospect.company, prospect.email)
 
     # Duplicate check — if a deal already exists for this email, skip
@@ -92,6 +125,15 @@ async def run_full_pipeline(payload: InstantlyWebhookPayload):
     deal_id = deal["id"]
     run_id  = await db.start_pipeline_run(deal_id)
     logger.info("Deal created: %s", deal_id)
+
+    # Score reply sentiment
+    try:
+        sentiment = await score_reply(reply, prospect.name, prospect.company)
+        await db.set_deal_sentiment(deal_id, sentiment["score"], sentiment["reason"], sentiment["emoji"])
+        await db.update_last_activity(deal_id)
+        logger.info("Sentiment: %s → %s", prospect.company, sentiment["score"])
+    except Exception as exc:
+        logger.warning("Sentiment scoring failed: %s", exc)
 
     # Stage 2 — Generate 5 ICP segments
     await db.update_pipeline_run(run_id, stage="icp_generation")
