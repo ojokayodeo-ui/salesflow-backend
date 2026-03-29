@@ -55,6 +55,8 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
         titles, icp.hq_country, emp_min, emp_max,
         keywords[0] if keywords else "none",
     )
+    # Log the full payload so we can see exactly what is being sent
+    logger.info("Apollo FULL PAYLOAD: %s", payload)
 
     headers = {
         "Content-Type": "application/json",
@@ -81,8 +83,15 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
             data = resp.json()
 
         people = data.get("people", [])
-        logger.info("Apollo raw response: %d people, pagination: %s",
-                    len(people), data.get("pagination", {}))
+        # Log the full response structure to diagnose 0 results
+        logger.info("Apollo raw response: %d people | total: %s | pagination: %s | keys: %s",
+                    len(people),
+                    data.get("pagination", {}).get("total_entries", "?"),
+                    data.get("pagination", {}),
+                    list(data.keys()),
+                )
+        if not people:
+            logger.info("Apollo full response (first 800 chars): %s", str(data)[:800])
 
         leads = []
         for p in people:
