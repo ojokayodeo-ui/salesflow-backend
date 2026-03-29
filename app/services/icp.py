@@ -1,16 +1,18 @@
 """
 ICP Generation Service
 
-Uses Claude to run a full 6-part B2B prospecting analysis on the prospect's
-company, incorporating their website content, LinkedIn, Instantly data, and
-reply text to produce a deeply targeted Apollo.io filter set.
+Generates 5 distinct ICP segments using Claude AI.
+Each segment represents a different audience the prospect's business could target,
+with a ready-to-use Apollo.io search prompt for manual list building.
+
+No Apollo API required — Claude does the intelligence, you do the search manually.
 """
 
 import json
 import logging
 import httpx
 from app.config import settings
-from app.models.schemas import ICPData, ProspectData
+from app.models.schemas import ProspectData
 
 logger = logging.getLogger(__name__)
 
@@ -18,106 +20,112 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 
 async def scrape_website(url: str) -> str:
-    """
-    Fetch and extract readable text from the prospect's website.
-    Returns empty string if the site can't be reached.
-    """
+    """Fetch and extract readable text from the prospect's website."""
     if not url:
         return ""
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
             resp.raise_for_status()
-            # Strip HTML tags simply
             text = resp.text
             import re
             text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL)
             text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.DOTALL)
             text = re.sub(r"<[^>]+>", " ", text)
             text = re.sub(r"\s+", " ", text).strip()
-            # Return first 3000 chars — enough for Claude to understand the business
             return text[:3000]
     except Exception as exc:
         logger.warning("Website scrape failed for %s: %s", url, exc)
         return ""
 
 
-async def generate_icp(prospect: ProspectData, reply_body: str = "") -> ICPData:
+async def generate_icp_segments(prospect: ProspectData, reply_body: str = "") -> list[dict]:
     """
-    Run the full 6-part ICP analysis using Claude.
-    Scrapes the prospect's website first to enrich the analysis.
-    Falls back to a safe default if the API call fails.
+    Generate 5 distinct ICP segments for the prospect's business.
+    Returns a list of 5 segment dicts, each ready to display in the frontend.
+    Falls back to sensible defaults if the API call fails.
     """
-    # Scrape website for richer context
     website_content = await scrape_website(prospect.website or "")
     if website_content:
         logger.info("Website scraped for %s (%d chars)", prospect.company, len(website_content))
-    else:
-        logger.info("No website content for %s — using Instantly data only", prospect.company)
 
-    # Build rich context block from all available prospect data
+    # Extract key signals from the reply
+    reply_signals = ""
+    if reply_body and reply_body.strip() and reply_body != "No reply text captured":
+        reply_signals = f"""
+=== CRITICAL: PROSPECT'S REPLY — READ THIS FIRST ===
+This is the most important signal. Extract any mentions of:
+- Specific industries or sectors they work in
+- Types of clients or customers they serve
+- Problems or challenges they mentioned
+- Geographic focus
+- Company types they target
+- Any specific names, sectors, or niches mentioned
+
+REPLY TEXT:
+"{reply_body}"
+=== END OF REPLY ===
+"""
+
     prospect_context = f"""
-PROSPECT DETAILS (from Instantly.ai):
+{reply_signals}
+PROSPECT DETAILS (from Instantly.ai — use to support the reply signals above):
 - Name: {prospect.name}
-- Email: {prospect.email}
 - Job Title: {prospect.job_title or 'Unknown'}
 - Company: {prospect.company}
 - Website: {prospect.website or prospect.domain or 'Unknown'}
-- LinkedIn: {prospect.linkedin or 'Not provided'}
 - Location: {prospect.location or 'Unknown'}
-- Company Headcount: {prospect.headcount or 'Unknown'}
-- Industry (Instantly): {prospect.industry or 'Unknown'}
+- Company Size: {prospect.headcount or 'Unknown'}
+- Industry: {prospect.industry or 'Unknown'}
 - Sub-industry: {prospect.sub_industry or 'Unknown'}
-- Company Description: {prospect.description[:500] if prospect.description else 'Not provided'}
+- Description: {prospect.description[:500] if prospect.description else 'Not provided'}
 - Headline: {prospect.headline or 'Not provided'}
 
-PROSPECT'S REPLY:
-"{reply_body or 'No reply text captured'}"
-
-WEBSITE CONTENT (scraped):
-{website_content if website_content else 'Could not scrape website — use company description and Instantly data above.'}
+WEBSITE CONTENT (supporting context — use to fill gaps the reply doesn't cover):
+{website_content if website_content else 'Could not scrape — rely on the reply and description above.'}
 """.strip()
 
-    prompt = f"""You are a B2B prospecting expert and outbound marketing strategist who specialises in building highly targeted lead lists using Apollo.io.
+    prompt = f"""You are a world-class B2B market segmentation expert specialising in outbound sales strategy.
 
-Your task is to analyse the following business and generate the best Apollo.io prospecting settings to find their ideal customers.
+Your task: Analyse the prospect below and identify the 5 best distinct audience segments they should be targeting with their outbound prospecting.
+
+IMPORTANT INSTRUCTIONS:
+1. START with the prospect's reply — this is the PRIMARY signal. If they mention specific industries, client types, or markets in their reply, those MUST be reflected in your segments.
+2. Use the website content and company description as SUPPORTING context to fill gaps.
+3. If the reply mentions a specific market (e.g. "we work with NHS trusts"), Segment 1 should directly reflect that.
+4. Make each segment MEANINGFULLY DIFFERENT — different industries, job titles, company sizes, or pain points.
+5. Be specific — "NHS Procurement Directors at acute trusts" beats "healthcare companies".
 
 {prospect_context}
-
-Use ALL the information above — the website content, the company description, the prospect's job title, their reply, and strategic inference — to determine the best targeting criteria.
-
-Provide outputs that can be directly used inside Apollo.io filters.
 
 Return ONLY valid JSON — no markdown, no explanation, no fences. Use this exact structure:
 
 {{
-  "industry": "Primary industry e.g. Management Consulting",
-  "sub_niche": "Specific niche e.g. NHS / Public Sector Strategy",
-  "company_size": "e.g. 10-50 employees",
-  "hq_country": "e.g. United Kingdom",
-  "revenue_range": "e.g. £500k-£5M",
-  "target_titles": ["Primary title 1", "Primary title 2", "Primary title 3"],
-  "secondary_titles": ["Secondary title 1", "Secondary title 2", "Alternative title 1"],
-  "pain_point": "The single biggest pain point this company's ideal customer faces",
-  "keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
-  "apollo_employee_min": 10,
-  "apollo_employee_max": 50,
-  "company_age_years": "2-6",
-  "buying_signal": "The strongest signal that a company needs this service right now",
-  "technologies": ["tech1", "tech2"],
-  "growth_signals": ["signal1", "signal2"],
-  "cold_email_hook": "One sentence hook that would resonate strongly with this audience",
-  "value_proposition": "One sentence value prop tailored to this ICP",
-  "ideal_list_size": 100,
-  "segmentation": ["Segment 1: e.g. By industry vertical", "Segment 2: e.g. By company size", "Segment 3: e.g. By seniority"]
-}}
-
-PART 1 thinking: What industry/niche does this prospect serve? Who are THEIR ideal customers?
-PART 2 thinking: What Apollo company filters would find those customers?
-PART 3 thinking: What job titles hold the buying power for this type of service?
-PART 4 thinking: What signals indicate a company is ready to buy right now?
-PART 5 thinking: How should the lead list be sized and segmented?
-PART 6 thinking: What cold email angle would cut through for this specific audience?"""
+  "segments": [
+    {{
+      "segment_number": 1,
+      "segment_name": "Short specific name e.g. NHS Procurement Directors",
+      "reply_signal": "Quote or paraphrase from the reply that led you to this segment (or 'inferred from website' if not in reply)",
+      "industry": "Primary industry",
+      "sub_niche": "Specific sub-niche",
+      "company_size": "e.g. 10-50 employees",
+      "employee_min": 10,
+      "employee_max": 50,
+      "hq_country": "e.g. United Kingdom",
+      "target_titles": ["Title 1", "Title 2", "Title 3"],
+      "secondary_titles": ["Alt Title 1", "Alt Title 2"],
+      "pain_point": "The single most pressing pain this segment faces that your prospect can solve",
+      "buying_signal": "The clearest signal that a company in this segment needs help right now",
+      "keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
+      "cold_email_hook": "One punchy sentence that would grab this audience's attention",
+      "apollo_prompt": "A 2-3 sentence plain English description to paste into Apollo AI search. Include job titles, industry, company size, location, and specific characteristics of this segment."
+    }},
+    {{segment 2}},
+    {{segment 3}},
+    {{segment 4}},
+    {{segment 5}}
+  ]
+}}"""
 
     headers = {
         "x-api-key":         settings.anthropic_api_key,
@@ -126,61 +134,179 @@ PART 6 thinking: What cold email angle would cut through for this specific audie
     }
     payload = {
         "model":      "claude-sonnet-4-20250514",
-        "max_tokens": 1500,
+        "max_tokens": 3000,
         "messages":   [{"role": "user", "content": prompt}],
     }
 
     try:
-        async with httpx.AsyncClient(timeout=45) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(ANTHROPIC_URL, json=payload, headers=headers)
             resp.raise_for_status()
             raw = resp.json()["content"][0]["text"]
-            # Strip any accidental markdown fences
             raw = raw.replace("```json", "").replace("```", "").strip()
             data = json.loads(raw)
-            icp = ICPData(**data)
-            logger.info(
-                "ICP generated for %s: %s / %s | Hook: %s",
-                prospect.company, icp.industry, icp.sub_niche,
-                (icp.cold_email_hook or "")[:60],
-            )
-            return icp
-
+            segments = data.get("segments", [])
+            if segments:
+                logger.info(
+                    "Generated %d ICP segments for %s: %s",
+                    len(segments), prospect.company,
+                    [s.get("segment_name","?") for s in segments],
+                )
+                return segments[:5]
     except Exception as exc:
-        logger.exception("ICP generation failed, using fallback: %s", exc)
+        logger.exception("ICP segment generation failed, using fallback: %s", exc)
+
+    # Fallback segments
+    return _fallback_segments(prospect)
+
+
+def _fallback_segments(prospect: ProspectData) -> list[dict]:
+    """Sensible fallback if Claude API fails."""
+    company = prospect.company or "the business"
+    country = prospect.location or "United Kingdom"
+
+    return [
+        {
+            "segment_number": 1,
+            "segment_name": "SME Managing Directors",
+            "industry": "Management Consulting",
+            "sub_niche": "Strategy & Business Growth",
+            "company_size": "10-50 employees",
+            "employee_min": 10,
+            "employee_max": 50,
+            "hq_country": country,
+            "target_titles": ["Managing Director", "CEO", "Founder"],
+            "secondary_titles": ["Director", "Owner"],
+            "pain_point": "No predictable pipeline of qualified meetings with decision-makers",
+            "buying_signal": "Hiring for business development or sales roles",
+            "keywords": ["consulting", "strategy", "growth", "B2B", "advisory"],
+            "cold_email_hook": "Most consulting firms grow purely on referrals — we add a predictable outbound engine alongside that.",
+            "apollo_prompt": f"Find Managing Directors, CEOs and Founders at consulting and advisory firms in {country} with 10-50 employees. Target companies that offer strategic or operational consulting services to B2B clients. Look for firms that are growing but don't have a structured outbound sales process.",
+        },
+        {
+            "segment_number": 2,
+            "segment_name": "Healthcare Sector Leaders",
+            "industry": "Healthcare Consulting",
+            "sub_niche": "NHS / Private Healthcare Advisory",
+            "company_size": "5-30 employees",
+            "employee_min": 5,
+            "employee_max": 30,
+            "hq_country": country,
+            "target_titles": ["Managing Director", "Head of Consulting", "Practice Lead"],
+            "secondary_titles": ["Director", "Partner"],
+            "pain_point": "Difficulty winning NHS and private healthcare contracts consistently",
+            "buying_signal": "Recently expanded team or added healthcare-specific services",
+            "keywords": ["healthcare consulting", "NHS", "private healthcare", "clinical", "health advisory"],
+            "cold_email_hook": "Healthcare consultancies that rely on frameworks and referrals are leaving consistent pipeline on the table.",
+            "apollo_prompt": f"Search for Managing Directors and Practice Leads at healthcare consulting firms in {country} with 5-30 employees. Target boutique consultancies specialising in NHS procurement, private healthcare strategy, or clinical operations. Prioritise firms that have recently hired or expanded their team.",
+        },
+        {
+            "segment_number": 3,
+            "segment_name": "Recruitment & Staffing Owners",
+            "industry": "Staffing & Recruiting",
+            "sub_niche": "Specialist Recruitment Agencies",
+            "company_size": "5-25 employees",
+            "employee_min": 5,
+            "employee_max": 25,
+            "hq_country": country,
+            "target_titles": ["Managing Director", "Founder", "Director"],
+            "secondary_titles": ["CEO", "Owner", "Head of Business Development"],
+            "pain_point": "Over-reliance on job boards and inbound — no consistent outbound to attract new client businesses",
+            "buying_signal": "Agency growing headcount but client base not keeping pace",
+            "keywords": ["recruitment agency", "staffing", "talent acquisition", "executive search", "headhunting"],
+            "cold_email_hook": "Most recruitment agencies compete on the same job boards — we help you reach new client businesses before they even post a role.",
+            "apollo_prompt": f"Find Founders and Managing Directors at specialist recruitment and staffing agencies in {country} with 5-25 employees. Focus on boutique agencies in niche sectors like healthcare, tech, or finance. Target those who place permanent candidates and rely heavily on repeat clients rather than having a structured business development function.",
+        },
+        {
+            "segment_number": 4,
+            "segment_name": "Professional Services Firms",
+            "industry": "Professional Services",
+            "sub_niche": "Accounting, Legal & Financial Advisory",
+            "company_size": "10-75 employees",
+            "employee_min": 10,
+            "employee_max": 75,
+            "hq_country": country,
+            "target_titles": ["Managing Partner", "Director", "Founder"],
+            "secondary_titles": ["Head of Business Development", "Practice Manager"],
+            "pain_point": "New client acquisition is entirely referral-dependent with no scalable outbound process",
+            "buying_signal": "Recently promoted to leadership or opened a new office location",
+            "keywords": ["professional services", "accounting", "financial advisory", "legal", "audit"],
+            "cold_email_hook": "Referral networks plateau — we build the outbound system that runs alongside them.",
+            "apollo_prompt": f"Search for Managing Partners, Directors and Founders at professional services firms in {country} with 10-75 employees. Target accountancy practices, financial advisory firms, and legal firms that serve B2B clients. Look for firms that have grown to a point where referrals alone are no longer sufficient to hit growth targets.",
+        },
+        {
+            "segment_number": 5,
+            "segment_name": "Technology & SaaS Leaders",
+            "industry": "Technology",
+            "sub_niche": "B2B SaaS & Tech Services",
+            "company_size": "15-100 employees",
+            "employee_min": 15,
+            "employee_max": 100,
+            "hq_country": country,
+            "target_titles": ["CEO", "Head of Sales", "VP Sales"],
+            "secondary_titles": ["Founder", "Chief Revenue Officer", "Sales Director"],
+            "pain_point": "Sales team spending too much time on unqualified outreach with poor conversion rates",
+            "buying_signal": "Actively hiring SDRs or outbound sales representatives",
+            "keywords": ["SaaS", "B2B software", "tech startup", "sales automation", "revenue growth"],
+            "cold_email_hook": "B2B SaaS teams hiring more SDRs rarely fix the underlying targeting problem — we fix the targeting.",
+            "apollo_prompt": f"Find CEOs, Heads of Sales and VP Sales at B2B SaaS and technology service companies in {country} with 15-100 employees. Target companies that sell to other businesses and have a dedicated sales team. Prioritise those actively hiring in sales or business development roles, which signals they're trying to scale outbound.",
+        },
+    ]
+
+
+# Keep backward compatibility — single ICP for pipeline use
+async def generate_icp(prospect: ProspectData, reply_body: str = ""):
+    """
+    Legacy single-ICP function — returns the first segment as an ICPData-compatible dict.
+    Used by the webhook pipeline for backward compatibility.
+    """
+    from app.models.schemas import ICPData
+    segments = await generate_icp_segments(prospect, reply_body)
+    if not segments:
+        return _fallback_icp()
+    s = segments[0]
+    try:
         return ICPData(
-            industry           = "Management Consulting",
-            sub_niche          = "Strategy & Operations",
-            company_size       = "10-50 employees",
-            hq_country         = "United Kingdom",
-            revenue_range      = "£500k-£5M",
-            target_titles      = ["Managing Director", "Founder", "CEO"],
-            secondary_titles   = ["Head of Strategy", "Director", "Partner"],
-            pain_point         = "No predictable pipeline for booking qualified meetings",
-            keywords           = ["management consulting", "strategy", "business growth", "B2B", "consulting firm"],
-            apollo_employee_min= 10,
-            apollo_employee_max= 50,
-            company_age_years  = "2-6",
-            buying_signal      = "Actively hiring in sales or business development",
-            technologies       = [],
-            growth_signals     = ["Hiring for sales roles", "Recently funded"],
-            cold_email_hook    = "Most consulting firms rely on referrals — we build you a predictable outbound system",
-            value_proposition  = "We deliver 100 verified leads and book qualified appointments on a pay-per-meeting basis",
-            ideal_list_size    = 100,
-            segmentation       = ["By industry vertical", "By company size", "By seniority level"],
+            industry            = s.get("industry", "Management Consulting"),
+            sub_niche           = s.get("sub_niche", "Strategy & Operations"),
+            company_size        = s.get("company_size", "10-50 employees"),
+            hq_country          = s.get("hq_country", "United Kingdom"),
+            target_titles       = s.get("target_titles", ["Managing Director"]),
+            pain_point          = s.get("pain_point", "No predictable pipeline"),
+            keywords            = s.get("keywords", ["consulting"]),
+            apollo_employee_min = s.get("employee_min", 10),
+            apollo_employee_max = s.get("employee_max", 50),
+            company_age_years   = "2-8",
+            buying_signal       = s.get("buying_signal", ""),
+            secondary_titles    = s.get("secondary_titles", []),
+            cold_email_hook     = s.get("cold_email_hook", ""),
+            value_proposition   = "",
+            ideal_list_size     = 100,
         )
+    except Exception:
+        return _fallback_icp()
 
 
-def icp_to_apollo_filters(icp: ICPData) -> dict:
-    """Map ICP fields to Apollo.io People Search filter parameters."""
-    all_titles = icp.target_titles + (icp.secondary_titles or [])
+def _fallback_icp():
+    from app.models.schemas import ICPData
+    return ICPData(
+        industry="Management Consulting", sub_niche="Strategy & Operations",
+        company_size="10-50 employees", hq_country="United Kingdom",
+        target_titles=["Managing Director", "Founder", "CEO"],
+        pain_point="No predictable pipeline for booking qualified meetings",
+        keywords=["management consulting", "strategy", "B2B"],
+        apollo_employee_min=10, apollo_employee_max=50,
+        company_age_years="2-6",
+        buying_signal="Actively hiring in sales or business development",
+    )
+
+
+def icp_to_apollo_filters(icp) -> dict:
     return {
-        "person_titles":                    all_titles,
-        "organization_industry_tag_ids":    icp.industry,
-        "organization_num_employees_ranges":f"{icp.apollo_employee_min},{icp.apollo_employee_max}",
-        "person_locations":                 [icp.hq_country],
-        "q_organization_keyword_tags":      icp.keywords,
-        "contact_email_status":             ["verified"],
-        "limit":                            icp.ideal_list_size or 100,
-        "sort_by":                          "recommendations",
+        "person_titles": icp.target_titles,
+        "organization_num_employees_ranges": f"{icp.apollo_employee_min},{icp.apollo_employee_max}",
+        "person_locations": [icp.hq_country],
+        "q_organization_keyword_tags": icp.keywords,
+        "contact_email_status": ["verified"],
+        "limit": 100,
     }
