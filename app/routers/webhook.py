@@ -48,7 +48,25 @@ async def run_full_pipeline(payload: InstantlyWebhookPayload):
     prospect = payload.to_prospect_data()
     reply    = payload.get_reply()
 
+    # Fix "Unknown" name — fall back to email or company if name is missing
+    if not prospect.name or prospect.name.strip() == "Unknown":
+        if prospect.email:
+            prospect.name = prospect.email.split("@")[0].replace(".", " ").title()
+        elif prospect.company:
+            prospect.name = prospect.company
+        else:
+            prospect.name = "Unknown Prospect"
+
     logger.info("=== Pipeline start: %s <%s> ===", prospect.company, prospect.email)
+
+    # Duplicate check — if a deal already exists for this email, skip
+    existing = await db.get_deal_by_email(prospect.email)
+    if existing:
+        logger.info(
+            "Deal already exists for %s (deal %s, stage %s) — skipping duplicate",
+            prospect.email, existing["id"], existing["stage"],
+        )
+        return
 
     # Stage 1 — Create CRM deal
     deal = await db.create_deal(
