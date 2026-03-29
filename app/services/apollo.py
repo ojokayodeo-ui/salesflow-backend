@@ -40,8 +40,8 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
         return []
 
     # Build the request payload from ICP fields
+    # Note: API key goes in X-Api-Key header, NOT in the request body
     payload = {
-        "api_key": settings.apollo_api_key,
         "per_page": min(limit, 100),
         "page": 1,
         "person_titles": icp.target_titles,
@@ -49,9 +49,9 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
         "organization_num_employees_ranges": [
             f"{icp.apollo_employee_min},{icp.apollo_employee_max}"
         ],
-        "contact_email_status": ["verified"],   # verified emails only
+        "contact_email_status": ["verified"],
         "q_organization_keyword_tags": icp.keywords,
-        "prospected_by_current_team": ["no"],   # exclude existing contacts
+        "prospected_by_current_team": ["no"],
     }
 
     # Add industry if present
@@ -68,7 +68,10 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
             resp = await client.post(
                 f"{APOLLO_BASE}/mixed_people/search",
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Api-Key": settings.apollo_api_key,
+                },
             )
             resp.raise_for_status()
             data = resp.json()
