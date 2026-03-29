@@ -13,7 +13,7 @@ from app.models.schemas import ICPData
 
 logger = logging.getLogger(__name__)
 
-APOLLO_BASE = "https://api.apollo.io/v1"
+APOLLO_BASE = "https://api.apollo.io/api/v1"
 
 
 async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
@@ -66,7 +66,7 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                f"{APOLLO_BASE}/mixed_people/search",
+                f"{APOLLO_BASE}/mixed_people/api_search",
                 json=payload,
                 headers={
                     "Content-Type": "application/json",
