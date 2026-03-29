@@ -46,6 +46,42 @@ def root():
     return {"status": "PALM backend running", "version": "3.1.0"}
 
 
+@app.get("/debug/apollo")
+async def debug_apollo():
+    """Test Apollo search directly and return the full response."""
+    import os, httpx
+    key = os.environ.get("APOLLO_API_KEY", "")
+    if not key:
+        return {"error": "APOLLO_API_KEY not set"}
+
+    payload = {
+        "per_page": 5,
+        "page": 1,
+        "person_titles[]": ["Managing Director", "CEO", "Founder"],
+        "person_locations[]": ["United Kingdom"],
+        "contact_email_status[]": ["verified"],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                "https://api.apollo.io/api/v1/mixed_people/api_search",
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Api-Key": key,
+                    "Cache-Control": "no-cache",
+                },
+            )
+        return {
+            "status_code": resp.status_code,
+            "payload_sent": payload,
+            "response": resp.json(),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/debug/env")
 def debug_env():
     anthropic = os.environ.get("ANTHROPIC_API_KEY", "")
