@@ -1,20 +1,29 @@
 import os
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import email, webhook, pipeline, crm
 from app.services.database import init_db
+from app.services.scheduler import run_scheduler
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Start the email scheduler as a background task
+    scheduler_task = asyncio.create_task(run_scheduler())
     yield
+    scheduler_task.cancel()
+    try:
+        await scheduler_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(
     title="PALM Backend",
-    version="3.0.0",
+    version="3.1.0",
     lifespan=lifespan,
 )
 
@@ -34,7 +43,7 @@ app.include_router(crm.router,      prefix="/api/crm",      tags=["CRM"])
 
 @app.get("/")
 def root():
-    return {"status": "PALM backend running", "version": "3.0.0"}
+    return {"status": "PALM backend running", "version": "3.1.0"}
 
 
 @app.get("/debug/env")
