@@ -141,6 +141,17 @@ async def init_db():
 
 # ── Deals ──────────────────────────────────────────────────────────────────
 
+async def get_deal_by_email(email: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM deals WHERE LOWER(email)=LOWER(?) ORDER BY created_at DESC LIMIT 1",
+            (email,),
+        ) as cur:
+            row = await cur.fetchone()
+    return _deal_row(row) if row else None
+
+
 async def create_deal(
     name: str, email: str, company: str,
     domain: str = "", campaign: str = "", reply_body: str = "",
