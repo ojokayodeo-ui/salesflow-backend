@@ -1,8 +1,7 @@
 import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Header
-from app.models.schemas import InstantlyWebhookPayload, ProspectData
-from app.services.icp import generate_icp
-from app.services.apollo import search_leads, leads_to_csv
+from app.models.schemas import InstantlyWebhookPayload
+from app.services.icp import generate_icp_segments
 from app.services.composer import compose_email_body
 from app.services.outlook import send_email_via_outlook
 from app.services import database as db
@@ -37,96 +36,117 @@ async def stop_sequence_if_active(prospect_email: str) -> bool:
 
 async def run_full_pipeline(payload: InstantlyWebhookPayload):
     """
-    Full automated pipeline triggered by Instantly.ai webhook.
-    Uses the normalised helper methods on the payload to handle
-    Instantly's flat field format.
+    Pipeline: Webhook → CRM deal created → 5 ICP segments generated → Notification email sent
+
+    Apollo search is now MANUAL:
+    - Claude generates 5 audience segments with Apollo search prompts
+    - You copy the prompt, search Apollo manually, pull the list
+    - No Apollo API needed
+
+    Email delivery still uses Outlook if configured.
     """
     prospect = payload.to_prospect_data()
     reply    = payload.get_reply()
 
     logger.info("=== Pipeline start: %s <%s> ===", prospect.company, prospect.email)
 
-    # Stage 1 — create CRM deal
+    # Stage 1 — Create CRM deal
     deal = await db.create_deal(
-        name       = prospect.name,
-        email      = prospect.email,
-        company    = prospect.company,
-        domain     = prospect.domain or "",
-        campaign   = payload.campaign_name or payload.campaign or "",
-        reply_body = reply,
+        name            = prospect.name,
+        email           = prospect.email,
+        company         = prospect.company,
+        domain          = prospect.domain or "",
+        campaign        = payload.campaign_name or payload.campaign or "",
+        reply_body      = reply,
+        job_title       = prospect.job_title or "",
+        job_level       = payload.jobLevel or "",
+        department      = payload.department or "",
+        linkedin        = prospect.linkedin or "",
+        location        = prospect.location or "",
+        headcount       = prospect.headcount or "",
+        industry        = prospect.industry or "",
+        sub_industry    = prospect.sub_industry or "",
+        company_website = prospect.website or "",
+        company_desc    = prospect.description or "",
+        headline        = prospect.headline or "",
+        reply_subject   = payload.reply_subject or "",
     )
     deal_id = deal["id"]
     run_id  = await db.start_pipeline_run(deal_id)
+    logger.info("Deal created: %s", deal_id)
 
-    # Stage 2 — ICP generation
+    # Stage 2 — Generate 5 ICP segments
     await db.update_pipeline_run(run_id, stage="icp_generation")
     try:
-        icp = await generate_icp(prospect, reply)
-        await db.set_deal_icp(deal_id, icp.model_dump())
+        segments = await generate_icp_segments(prospect, reply)
+        # Store segments as ICP JSON (list of 5)
+        await db.set_deal_icp(deal_id, {"segments": segments})
         await db.advance_deal_stage(deal_id, "icp")
-        logger.info("ICP done: %s / %s", icp.industry, icp.sub_niche)
+        logger.info(
+            "5 ICP segments generated for %s: %s",
+            prospect.company,
+            [s.get("segment_name", "?") for s in segments],
+        )
     except Exception as exc:
-        logger.exception("ICP failed for %s", deal_id)
+        logger.exception("ICP generation failed for %s", deal_id)
         await db.finish_pipeline_run(run_id, status="failed", error=str(exc))
         return
 
-    # Stage 3 — Apollo lead search
-    await db.update_pipeline_run(run_id, stage="apollo_search")
-    try:
-        leads = await search_leads(icp, limit=100)
-        if leads:
-            await db.save_leads(deal_id, run_id, leads)
-            logger.info("%d leads saved", len(leads))
-        else:
-            logger.warning("Apollo returned 0 leads for %s", deal_id)
-    except Exception as exc:
-        logger.exception("Apollo failed for %s", deal_id)
-        leads = []
+    # Stage 3 — Send notification email (if Outlook is configured)
+    # This notifies YOU that a new positive reply came in and ICP is ready
+    if settings.ms_sender_email and settings.ms_tenant_id:
+        await db.update_pipeline_run(run_id, stage="notification")
+        try:
+            from app.models.schemas import ICPData
+            # Build a simple ICPData from first segment for the email template
+            first_seg = segments[0] if segments else {}
+            icp_for_email = ICPData(
+                industry            = first_seg.get("industry", "Consulting"),
+                sub_niche           = first_seg.get("sub_niche", ""),
+                company_size        = first_seg.get("company_size", ""),
+                hq_country          = first_seg.get("hq_country", ""),
+                target_titles       = first_seg.get("target_titles", []),
+                pain_point          = first_seg.get("pain_point", ""),
+                keywords            = first_seg.get("keywords", []),
+                apollo_employee_min = first_seg.get("employee_min", 10),
+                apollo_employee_max = first_seg.get("employee_max", 50),
+                company_age_years   = "2-8",
+                buying_signal       = first_seg.get("buying_signal", ""),
+                cold_email_hook     = first_seg.get("cold_email_hook", ""),
+            )
 
-    # Stage 4 — send or hold for review
-    if settings.review_mode:
-        await db.advance_deal_stage(deal_id, "pending_review")
-        await db.update_pipeline_run(run_id, stage="awaiting_review", status="paused")
-        logger.info("Review mode — deal %s paused", deal_id)
-        return
+            seg_summary = "\n".join([
+                f"Segment {s.get('segment_number','')}: {s.get('segment_name','')}"
+                for s in segments
+            ])
 
-    await _send_leads_email(deal_id, run_id, prospect, icp, leads)
+            body = f"""New positive reply received from {prospect.name} at {prospect.company}.
 
+Their reply: "{reply[:200]}{'...' if len(reply)>200 else ''}"
 
-async def _send_leads_email(deal_id, run_id, prospect, icp, leads):
-    await db.update_pipeline_run(run_id, stage="email_delivery")
-    try:
-        approved_leads = await db.get_leads_for_deal(deal_id, approved_only=True)
-        csv_data = leads_to_csv(approved_leads if approved_leads else leads)
+5 ICP segments have been generated. Open your PALM app to view them and get the Apollo search prompts.
 
-        email_body = await compose_email_body(
-            prospect     = prospect,
-            icp          = icp,
-            from_name    = settings.default_from_name,
-            sender_email = settings.ms_sender_email,
-            template     = settings.default_email_template,
-        )
+Segments generated:
+{seg_summary}
 
-        result = await send_email_via_outlook(
-            to_email     = prospect.email,
-            to_name      = prospect.name,
-            from_name    = settings.default_from_name,
-            subject      = f"Your 100 leads — {prospect.company}",
-            body         = email_body,
-            csv_data     = csv_data,
-            csv_filename = "leads_100.csv",
-        )
+View deal: https://your-netlify-app.netlify.app (CRM tab)
+"""
 
-        if result["success"]:
-            await db.advance_deal_stage(deal_id, "delivered")
-            await db.finish_pipeline_run(run_id, status="complete")
-            logger.info("Email sent to %s", prospect.email)
-        else:
-            raise RuntimeError(result.get("error", "Send failed"))
+            await send_email_via_outlook(
+                to_email     = settings.ms_sender_email,
+                to_name      = "Kayode",
+                from_name    = settings.default_from_name,
+                subject      = f"New reply: {prospect.name} at {prospect.company} — ICP ready",
+                body         = body,
+                csv_data     = None,
+                csv_filename = "",
+            )
+            logger.info("Notification email sent for %s", prospect.email)
+        except Exception as exc:
+            logger.warning("Notification email failed (non-critical): %s", exc)
 
-    except Exception as exc:
-        logger.exception("Email delivery failed for %s", deal_id)
-        await db.finish_pipeline_run(run_id, status="failed", error=str(exc))
+    await db.finish_pipeline_run(run_id, status="complete")
+    logger.info("=== Pipeline complete for %s ===", prospect.company)
 
 
 @router.post("/instantly")
@@ -135,10 +155,6 @@ async def receive_instantly_webhook(
     background_tasks: BackgroundTasks,
     x_instantly_secret: str | None = Header(default=None),
 ):
-    """
-    Receives webhook events from Instantly.ai.
-    Handles Instantly's actual flat payload format.
-    """
     verify_webhook_secret(x_instantly_secret)
 
     prospect_email = payload.get_prospect_email()
@@ -146,12 +162,10 @@ async def receive_instantly_webhook(
 
     logger.info("Webhook received: event=%s email=%s", event, prospect_email)
 
-    # Stop any active sequence for this prospect on any reply
     sequence_stopped = False
     if event in ANY_REPLY_EVENTS:
         sequence_stopped = await stop_sequence_if_active(prospect_email)
 
-    # Only run full pipeline for positive/interested replies
     if event not in POSITIVE_EVENTS:
         return {
             "received":         True,
@@ -172,5 +186,4 @@ async def receive_instantly_webhook(
         "prospect":    prospect_email,
         "company":     payload.get_company(),
         "event":       event,
-        "review_mode": settings.review_mode,
     }
