@@ -361,6 +361,18 @@ async def cancel_all_scheduled(deal_id: str):
 
 # ── CSV Upload & Lead Delivery ───────────────────────────────────────────────
 
+@router.delete("/deals/{deal_id}/leads")
+async def delete_all_leads(deal_id: str):
+    """Remove all leads for a deal — used when user uploads wrong CSV."""
+    from app.services.database import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM leads WHERE deal_id=$1", deal_id)
+    deleted = int(result.split()[-1]) if result else 0
+    logger.info("Deleted %d leads for deal %s", deleted, deal_id)
+    return {"deleted": True, "deal_id": deal_id, "count": deleted}
+
+
 @router.post("/deals/{deal_id}/upload-leads")
 async def upload_leads_csv(deal_id: str, body: dict):
     """
