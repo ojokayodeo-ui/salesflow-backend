@@ -61,8 +61,7 @@ async def stop_sequence_if_active(prospect_email: str) -> bool:
     ]
     for deal in matching:
         await db.stop_sequence(deal["id"], reason="prospect_replied")
-        await db.advance_deal_stage(deal["id"], "replied")
-        logger.info("Sequence stopped for %s", prospect_email)
+        logger.info("Sequence stopped for %s — deal stays in current stage", prospect_email)
     return bool(matching)
 
 
