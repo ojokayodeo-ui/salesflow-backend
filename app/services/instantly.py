@@ -45,7 +45,18 @@ async def get_lead_by_email(email: str) -> dict:
             logger.info("No lead found in Instantly for %s", email)
             return {}
 
-        lead = items[0]
+        # Strict email match — verify the returned lead matches the searched email
+        lead = None
+        for item in items:
+            item_email = (item.get("email") or "").lower().strip()
+            if item_email == email.lower().strip():
+                lead = item
+                break
+
+        if not lead:
+            logger.info("Instantly returned leads but none matched email %s exactly", email)
+            return {}
+
         logger.info("Enriched lead from Instantly: %s at %s",
                    lead.get("first_name","") or lead.get("firstName",""),
                    lead.get("company_name","") or lead.get("companyName",""))
