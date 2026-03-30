@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PALM Backend",
-    version="3.1.0",
+    version="3.2.0",  # bumped to force redeploy
     lifespan=lifespan,
 )
 
@@ -46,7 +46,7 @@ app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"]
 
 @app.get("/")
 def root():
-    return {"status": "PALM backend running", "version": "3.1.0"}
+    return {"status": "PALM backend running", "version": "3.2.0"}
 
 
 @app.get("/debug/apollo")
@@ -89,11 +89,17 @@ async def debug_apollo():
 def debug_env():
     anthropic = os.environ.get("ANTHROPIC_API_KEY", "")
     apollo    = os.environ.get("APOLLO_API_KEY", "")
+    ms_tenant = os.environ.get("MS_TENANT_ID", "")
+    ms_client = os.environ.get("MS_CLIENT_ID", "")
+    ms_sender = os.environ.get("MS_SENDER_EMAIL", "")
     return {
         "anthropic_set":    bool(anthropic),
         "anthropic_prefix": anthropic[:15] if anthropic else "NOT SET",
         "apollo_set":       bool(apollo),
         "apollo_prefix":    apollo[:10] if apollo else "NOT SET",
+        "ms_tenant_set":    bool(ms_tenant),
+        "ms_client_set":    bool(ms_client),
+        "ms_sender":        ms_sender or "NOT SET",
         "review_mode":      os.environ.get("REVIEW_MODE", "not set"),
         "from_name":        os.environ.get("DEFAULT_FROM_NAME", "not set"),
     }
