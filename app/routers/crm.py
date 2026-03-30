@@ -358,3 +358,164 @@ async def cancel_all_scheduled(deal_id: str):
     from app.services.database import cancel_scheduled_emails
     await cancel_scheduled_emails(deal_id)
     return {"cancelled": True, "deal_id": deal_id}
+
+
+# ── CSV Upload & Lead Delivery ───────────────────────────────────────────────
+
+@router.post("/deals/{deal_id}/upload-leads")
+async def upload_leads_csv(deal_id: str, body: dict):
+    """
+    Accept a CSV (as text) uploaded from the frontend.
+    Parses it into lead rows, saves to DB, returns parsed count.
+    Body: { "csv_text": "...", "filename": "leads.csv" }
+    """
+    deal = await db.get_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+
+    csv_text = body.get("csv_text", "")
+    filename = body.get("filename", "leads.csv")
+    if not csv_text.strip():
+        raise HTTPException(status_code=400, detail="csv_text is empty")
+
+    # Parse CSV into lead dicts
+    import csv, io
+    reader = csv.DictReader(io.StringIO(csv_text))
+    leads = []
+    for row in reader:
+        # Normalise common column name variants
+        def g(*keys):
+            for k in keys:
+                for rk in row:
+                    if rk.strip().lower() == k.lower():
+                        return row[rk].strip()
+            return ""
+        leads.append({
+            "first_name":   g("first name", "firstname", "first_name"),
+            "last_name":    g("last name", "lastname", "last_name"),
+            "full_name":    g("full name", "fullname", "full_name", "name"),
+            "title":        g("title", "job title", "jobtitle", "position"),
+            "email":        g("email", "email address", "work email"),
+            "company":      g("company", "company name", "organisation", "organization"),
+            "city":         g("city", "location"),
+            "country":      g("country"),
+            "linkedin_url": g("linkedin", "linkedin url", "linkedin_url", "profile url"),
+        })
+
+    if not leads:
+        raise HTTPException(status_code=400, detail="No rows parsed from CSV")
+
+    run_id = await db.start_pipeline_run(deal_id)
+    await db.save_leads(deal_id, run_id, leads)
+    await db.finish_pipeline_run(run_id, status="complete")
+
+    logger.info("Uploaded %d leads for deal %s from %s", len(leads), deal_id, filename)
+    return {
+        "uploaded":  True,
+        "deal_id":   deal_id,
+        "count":     len(leads),
+        "filename":  filename,
+    }
+
+
+@router.post("/deals/{deal_id}/draft-email")
+async def draft_delivery_email(deal_id: str, body: dict):
+    """
+    Ask Claude to draft the lead delivery email for this deal.
+    Body: { "template": "warm|direct|ai", "custom_note": "..." }
+    Returns: { "subject": "...", "body": "..." }
+    """
+    deal = await db.get_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+
+    from app.models.schemas import ProspectData, ICPData
+    from app.services.composer import compose_email_body
+    from app.config import settings
+
+    template    = body.get("template", "ai")
+    custom_note = body.get("custom_note", "")
+
+    prospect = ProspectData(
+        name    = deal["name"],
+        email   = deal["email"],
+        company = deal["company"],
+        domain  = deal.get("domain", ""),
+    )
+
+    icp_dict = deal.get("icp") or {}
+    try:
+        icp = ICPData(**icp_dict)
+    except Exception:
+        icp = None
+
+    body_text = await compose_email_body(
+        prospect     = prospect,
+        icp          = icp,
+        from_name    = settings.default_from_name or "Kayode",
+        sender_email = settings.ms_sender_email or "",
+        template     = template,
+    )
+
+    # Append custom note if provided
+    if custom_note.strip():
+        body_text += f"\n\n{custom_note.strip()}"
+
+    first_name = deal["name"].split()[0] if deal["name"] else "there"
+    subject = f"Your targeted lead list — {deal.get('company', '')}"
+
+    return {"subject": subject, "body": body_text}
+
+
+@router.post("/deals/{deal_id}/send-leads")
+async def send_leads_to_prospect(deal_id: str, background_tasks: BackgroundTasks, body: dict):
+    """
+    Send the uploaded CSV + email body to the prospect.
+    Body: { "subject": "...", "body": "...", "filename": "leads.csv" }
+    The CSV is pulled from the deal's stored leads.
+    """
+    deal = await db.get_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+
+    subject  = body.get("subject", f"Your leads — {deal.get('company','')}")
+    body_txt = body.get("body", "")
+    filename = body.get("filename", "leads.csv")
+
+    if not body_txt.strip():
+        raise HTTPException(status_code=400, detail="Email body is empty")
+
+    background_tasks.add_task(
+        _send_leads_to_prospect_bg,
+        deal_id, deal, subject, body_txt, filename
+    )
+    return {"queued": True, "deal_id": deal_id, "to": deal["email"]}
+
+
+async def _send_leads_to_prospect_bg(
+    deal_id: str, deal: dict,
+    subject: str, body_txt: str, filename: str
+):
+    from app.services.outlook import send_email_via_outlook
+    from app.services.apollo import leads_to_csv
+    from app.config import settings
+
+    # Get leads from DB
+    leads = await db.get_leads_for_deal(deal_id, approved_only=False)
+    csv_data = leads_to_csv(leads) if leads else None
+
+    result = await send_email_via_outlook(
+        to_email     = deal["email"],
+        to_name      = deal["name"],
+        from_name    = settings.default_from_name or "Kayode",
+        subject      = subject,
+        body         = body_txt,
+        csv_data     = csv_data,
+        csv_filename = filename,
+    )
+
+    if result.get("success"):
+        await db.advance_deal_stage(deal_id, "delivered")
+        logger.info("Leads sent to prospect %s — deal advanced to delivered", deal["email"])
+    else:
+        logger.error("Failed to send leads to %s: %s", deal["email"], result.get("error"))
