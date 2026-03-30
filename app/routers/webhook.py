@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import time
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Header
 from app.models.schemas import InstantlyWebhookPayload
 from app.services.icp import generate_icp_segments
@@ -15,6 +17,34 @@ logger = logging.getLogger(__name__)
 POSITIVE_EVENTS  = {"reply.positive", "lead_interested"}
 ANY_REPLY_EVENTS = {"reply.positive", "reply", "email_reply",
                     "lead_interested", "reply.negative", "reply.all"}
+
+# ── Idempotency lock ────────────────────────────────────────────────────────
+# Two-layer deduplication:
+# 1. In-memory dict tracks recently seen (email, event) pairs — blocks within 120s
+# 2. asyncio.Lock per email prevents concurrent pipeline runs for the same lead
+_recent_webhooks: dict[str, float] = {}
+_pipeline_locks: dict[str, asyncio.Lock] = {}
+IDEMPOTENCY_TTL = 120  # seconds
+
+def _get_pipeline_lock(email: str) -> asyncio.Lock:
+    key = email.lower()
+    if key not in _pipeline_locks:
+        _pipeline_locks[key] = asyncio.Lock()
+    return _pipeline_locks[key]
+
+def _is_duplicate_webhook(email: str, event: str) -> bool:
+    key = f"{email.lower()}:{event}"
+    now = time.time()
+    # Clean up expired keys
+    expired = [k for k, t in list(_recent_webhooks.items()) if now - t > IDEMPOTENCY_TTL]
+    for k in expired:
+        _recent_webhooks.pop(k, None)
+    if key in _recent_webhooks:
+        age = round(now - _recent_webhooks[key], 1)
+        logger.info("Idempotency block: duplicate webhook for %s (age=%ss)", email, age)
+        return True
+    _recent_webhooks[key] = now
+    return False
 
 
 def verify_webhook_secret(x_instantly_secret: str | None):
@@ -39,13 +69,22 @@ async def stop_sequence_if_active(prospect_email: str) -> bool:
 async def run_full_pipeline(payload: InstantlyWebhookPayload):
     """
     Pipeline: Webhook → CRM deal created → 5 ICP segments generated → Notification email sent
+    Wrapped in a per-email asyncio lock to prevent race conditions from duplicate webhooks.
+    """
+    email_key = (payload.email or payload.lead_email or "").lower()
+    lock = _get_pipeline_lock(email_key)
 
-    Apollo search is now MANUAL:
-    - Claude generates 5 audience segments with Apollo search prompts
-    - You copy the prompt, search Apollo manually, pull the list
-    - No Apollo API needed
+    if lock.locked():
+        logger.info("Pipeline already running for %s — skipping duplicate", email_key)
+        return
 
-    Email delivery still uses Outlook if configured.
+    async with lock:
+        await _run_pipeline_inner(payload)
+
+
+async def _run_pipeline_inner(payload: InstantlyWebhookPayload):
+    """
+    Inner pipeline logic — runs with per-email lock held.
     """
     prospect = payload.to_prospect_data()
     reply    = payload.get_reply()
@@ -233,6 +272,15 @@ async def receive_instantly_webhook(
     event          = payload.get_event()
 
     logger.info("Webhook received: event=%s email=%s", event, prospect_email)
+
+    # ── Idempotency check — block duplicate webhooks within 120s ─────────────
+    if event in POSITIVE_EVENTS and prospect_email:
+        if _is_duplicate_webhook(prospect_email, event):
+            return {
+                "received":  True,
+                "processed": False,
+                "reason":    "duplicate webhook blocked (idempotency)",
+            }
 
     sequence_stopped = False
     if event in ANY_REPLY_EVENTS:
