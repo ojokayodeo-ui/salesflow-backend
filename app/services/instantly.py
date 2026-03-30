@@ -27,10 +27,10 @@ async def get_lead_by_email(email: str) -> dict:
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            # Instantly v2 uses POST /leads/list with a JSON body filter
+            # Instantly v2 uses POST /leads/list with filter object
             resp = await client.post(
                 f"{INSTANTLY_API_BASE}/leads/list",
-                json={"email": email, "limit": 1},
+                json={"filter": {"email": email}, "limit": 1},
                 headers={
                     "Authorization": f"Bearer {settings.instantly_api_key}",
                     "Content-Type": "application/json",
