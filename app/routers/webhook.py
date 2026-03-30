@@ -1,18 +1,10 @@
 import logging
+import time
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Header
 from app.models.schemas import InstantlyWebhookPayload
 from app.services.icp import generate_icp_segments
-try:
-    from app.services.sentiment import score_reply
-except ImportError:
-    async def score_reply(reply, name="", company=""):
-        return {"score": "warm", "reason": "Sentiment module not available", "emoji": "☀️"}
-
-try:
-    from app.services.instantly import get_lead_by_email, extract_prospect_data
-except ImportError:
-    async def get_lead_by_email(email): return {}
-    def extract_prospect_data(lead, payload): return {}
+from app.services.sentiment import score_reply
+from app.services.instantly import get_lead_by_email, extract_prospect_data
 from app.services.composer import compose_email_body
 from app.services.outlook import send_email_via_outlook
 from app.services import database as db
@@ -24,6 +16,25 @@ logger = logging.getLogger(__name__)
 POSITIVE_EVENTS  = {"reply.positive", "lead_interested"}
 ANY_REPLY_EVENTS = {"reply.positive", "reply", "email_reply",
                     "lead_interested", "reply.negative", "reply.all"}
+
+# ── Idempotency lock ────────────────────────────────────────────────────────
+# In-memory set of (email, event) keys with timestamps.
+# Prevents the same webhook firing twice within 60 seconds.
+_recent_webhooks: dict[str, float] = {}
+IDEMPOTENCY_TTL = 60  # seconds
+
+def _is_duplicate_webhook(email: str, event: str) -> bool:
+    key = f"{email.lower()}:{event}"
+    now = time.time()
+    # Clean up expired keys
+    expired = [k for k, t in _recent_webhooks.items() if now - t > IDEMPOTENCY_TTL]
+    for k in expired:
+        del _recent_webhooks[k]
+    if key in _recent_webhooks:
+        logger.info("Idempotency block: duplicate webhook for %s within %ss", email, IDEMPOTENCY_TTL)
+        return True
+    _recent_webhooks[key] = now
+    return False
 
 
 def verify_webhook_secret(x_instantly_secret: str | None):
@@ -45,21 +56,54 @@ async def stop_sequence_if_active(prospect_email: str) -> bool:
     return bool(matching)
 
 
+async def _find_existing_deal(email: str, name: str, company: str) -> dict | None:
+    """
+    3-layer duplicate detection:
+      1. Exact email match
+      2. Name + company match (catches partial-data duplicates)
+      3. Company + domain match (catches same person with different email format)
+    """
+    # Layer 1 — email
+    existing = await db.get_deal_by_email(email)
+    if existing:
+        return existing
+
+    # Layer 2 — name + company (case-insensitive)
+    if name and company:
+        all_deals = await db.list_deals()
+        name_l    = name.strip().lower()
+        company_l = company.strip().lower()
+        for d in all_deals:
+            if (d.get("name", "").strip().lower() == name_l and
+                    d.get("company", "").strip().lower() == company_l):
+                logger.info("Duplicate by name+company: %s @ %s", name, company)
+                return d
+
+    # Layer 3 — domain match (same company domain, different email)
+    if email and "@" in email:
+        domain = email.split("@")[1].lower()
+        if company and domain:
+            all_deals = await db.list_deals()
+            company_l = company.strip().lower()
+            for d in all_deals:
+                d_email = d.get("email", "")
+                d_domain = d_email.split("@")[1].lower() if "@" in d_email else ""
+                if (d_domain == domain and
+                        d.get("company", "").strip().lower() == company_l):
+                    logger.info("Duplicate by domain+company: %s / %s", domain, company)
+                    return d
+
+    return None
+
+
 async def run_full_pipeline(payload: InstantlyWebhookPayload):
     """
     Pipeline: Webhook → CRM deal created → 5 ICP segments generated → Notification email sent
-
-    Apollo search is now MANUAL:
-    - Claude generates 5 audience segments with Apollo search prompts
-    - You copy the prompt, search Apollo manually, pull the list
-    - No Apollo API needed
-
-    Email delivery still uses Outlook if configured.
     """
     prospect = payload.to_prospect_data()
     reply    = payload.get_reply()
 
-    # Fix "Unknown" name — fall back to email or company if name is missing
+    # Fix "Unknown" name
     if not prospect.name or prospect.name.strip() == "Unknown":
         if prospect.email:
             prospect.name = prospect.email.split("@")[0].replace(".", " ").title()
@@ -75,37 +119,40 @@ async def run_full_pipeline(payload: InstantlyWebhookPayload):
             lead_data = await get_lead_by_email(email)
             if lead_data:
                 enriched = extract_prospect_data(lead_data, payload)
-                # Update prospect with full data
                 from app.models.schemas import ProspectData
                 prospect = ProspectData(
-                    name        = enriched["name"],
-                    email       = email,
-                    company     = enriched["company"] or prospect.company,
-                    domain      = enriched["domain"] or prospect.domain,
-                    website     = enriched["website"] or prospect.website,
-                    job_title   = enriched["job_title"],
-                    job_level   = enriched["job_level"],
-                    linkedin    = enriched["linkedin"],
-                    location    = enriched["location"],
-                    headcount   = enriched["headcount"],
-                    industry    = enriched["industry"],
-                    sub_industry= enriched["sub_industry"],
-                    description = enriched["description"],
-                    headline    = enriched["headline"],
-                    department  = enriched["department"],
+                    name         = enriched["name"] or prospect.name,
+                    email        = email,
+                    company      = enriched["company"] or prospect.company,
+                    domain       = enriched["domain"] or prospect.domain,
+                    website      = enriched["website"] or prospect.website,
+                    job_title    = enriched["job_title"],
+                    job_level    = enriched["job_level"],
+                    linkedin     = enriched["linkedin"],
+                    location     = enriched["location"],
+                    headcount    = enriched["headcount"],
+                    industry     = enriched["industry"],
+                    sub_industry = enriched["sub_industry"],
+                    description  = enriched["description"],
+                    headline     = enriched["headline"],
+                    department   = enriched["department"],
                 )
-                logger.info("Enriched prospect: %s at %s (%s)", 
-                           prospect.name, prospect.company, prospect.job_title)
+                logger.info("Enriched prospect: %s at %s (%s)",
+                            prospect.name, prospect.company, prospect.job_title)
         except Exception as exc:
             logger.warning("Instantly enrichment failed: %s", exc)
 
     logger.info("=== Pipeline start: %s <%s> ===", prospect.company, prospect.email)
 
-    # Duplicate check — if a deal already exists for this email, skip
-    existing = await db.get_deal_by_email(prospect.email)
+    # ── Duplicate check (3 layers) ──────────────────────────────────────────
+    existing = await _find_existing_deal(
+        email   = prospect.email or "",
+        name    = prospect.name or "",
+        company = prospect.company or "",
+    )
     if existing:
         logger.info(
-            "Deal already exists for %s (deal %s, stage %s) — skipping duplicate",
+            "Duplicate deal found for %s (id=%s stage=%s) — skipping",
             prospect.email, existing["id"], existing["stage"],
         )
         return
@@ -148,7 +195,6 @@ async def run_full_pipeline(payload: InstantlyWebhookPayload):
     await db.update_pipeline_run(run_id, stage="icp_generation")
     try:
         segments = await generate_icp_segments(prospect, reply)
-        # Store segments as ICP JSON (list of 5)
         await db.set_deal_icp(deal_id, {"segments": segments})
         await db.advance_deal_stage(deal_id, "icp")
         logger.info(
@@ -162,33 +208,13 @@ async def run_full_pipeline(payload: InstantlyWebhookPayload):
         return
 
     # Stage 3 — Send notification email (if Outlook is configured)
-    # This notifies YOU that a new positive reply came in and ICP is ready
     if settings.ms_sender_email and settings.ms_tenant_id:
         await db.update_pipeline_run(run_id, stage="notification")
         try:
-            from app.models.schemas import ICPData
-            # Build a simple ICPData from first segment for the email template
-            first_seg = segments[0] if segments else {}
-            icp_for_email = ICPData(
-                industry            = first_seg.get("industry", "Consulting"),
-                sub_niche           = first_seg.get("sub_niche", ""),
-                company_size        = first_seg.get("company_size", ""),
-                hq_country          = first_seg.get("hq_country", ""),
-                target_titles       = first_seg.get("target_titles", []),
-                pain_point          = first_seg.get("pain_point", ""),
-                keywords            = first_seg.get("keywords", []),
-                apollo_employee_min = first_seg.get("employee_min", 10),
-                apollo_employee_max = first_seg.get("employee_max", 50),
-                company_age_years   = "2-8",
-                buying_signal       = first_seg.get("buying_signal", ""),
-                cold_email_hook     = first_seg.get("cold_email_hook", ""),
-            )
-
             seg_summary = "\n".join([
                 f"Segment {s.get('segment_number','')}: {s.get('segment_name','')}"
                 for s in segments
             ])
-
             body = f"""New positive reply received from {prospect.name} at {prospect.company}.
 
 Their reply: "{reply[:200]}{'...' if len(reply)>200 else ''}"
@@ -200,7 +226,6 @@ Segments generated:
 
 View deal: https://your-netlify-app.netlify.app (CRM tab)
 """
-
             await send_email_via_outlook(
                 to_email     = settings.ms_sender_email,
                 to_name      = "Kayode",
@@ -231,6 +256,15 @@ async def receive_instantly_webhook(
 
     logger.info("Webhook received: event=%s email=%s", event, prospect_email)
 
+    # ── Idempotency check — block duplicate webhooks within 60s ────────────
+    if event in POSITIVE_EVENTS and prospect_email:
+        if _is_duplicate_webhook(prospect_email, event):
+            return {
+                "received":  True,
+                "processed": False,
+                "reason":    "duplicate webhook blocked (idempotency)",
+            }
+
     sequence_stopped = False
     if event in ANY_REPLY_EVENTS:
         sequence_stopped = await stop_sequence_if_active(prospect_email)
@@ -250,9 +284,9 @@ async def receive_instantly_webhook(
     logger.info("Pipeline queued for %s <%s>", payload.get_company(), prospect_email)
 
     return {
-        "received":    True,
-        "processed":   True,
-        "prospect":    prospect_email,
-        "company":     payload.get_company(),
-        "event":       event,
+        "received":  True,
+        "processed": True,
+        "prospect":  prospect_email,
+        "company":   payload.get_company(),
+        "event":     event,
     }
