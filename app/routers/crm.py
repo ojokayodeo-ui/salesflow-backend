@@ -148,10 +148,21 @@ async def _send_approved_leads(deal_id: str, deal: dict):
     from app.config import settings
 
     prospect = ProspectData(
-        name    = deal["name"],
-        email   = deal["email"],
-        company = deal["company"],
-        domain  = deal.get("domain",""),
+        name        = deal["name"],
+        email       = deal["email"],
+        company     = deal["company"],
+        domain      = deal.get("domain",""),
+        job_title   = deal.get("job_title",""),
+        job_level   = deal.get("job_level",""),
+        location    = deal.get("location",""),
+        headcount   = deal.get("headcount",""),
+        industry    = deal.get("industry",""),
+        sub_industry= deal.get("sub_industry",""),
+        linkedin    = deal.get("linkedin",""),
+        description = deal.get("company_desc",""),
+        headline    = deal.get("headline",""),
+        department  = deal.get("department",""),
+        website     = deal.get("company_website",""),
     )
 
     icp_dict = deal.get("icp") or {}
@@ -448,10 +459,21 @@ async def draft_delivery_email(deal_id: str, body: dict):
     custom_note = body.get("custom_note", "")
 
     prospect = ProspectData(
-        name    = deal["name"],
-        email   = deal["email"],
-        company = deal["company"],
-        domain  = deal.get("domain", ""),
+        name        = deal["name"],
+        email       = deal["email"],
+        company     = deal["company"],
+        domain      = deal.get("domain", ""),
+        job_title   = deal.get("job_title",""),
+        job_level   = deal.get("job_level",""),
+        location    = deal.get("location",""),
+        headcount   = deal.get("headcount",""),
+        industry    = deal.get("industry",""),
+        sub_industry= deal.get("sub_industry",""),
+        linkedin    = deal.get("linkedin",""),
+        description = deal.get("company_desc",""),
+        headline    = deal.get("headline",""),
+        department  = deal.get("department",""),
+        website     = deal.get("company_website",""),
     )
 
     icp_dict = deal.get("icp") or {}
@@ -617,3 +639,99 @@ Write a warm, professional email delivering the lead list. 3 short paragraphs. N
     except Exception as exc:
         logger.error("AI draft failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"AI draft failed: {str(exc)}")
+
+
+# ── Notes Endpoints ──────────────────────────────────────────────────────────
+
+@router.get("/deals/{deal_id}/notes")
+async def get_notes(deal_id: str):
+    notes = await db.get_notes(deal_id)
+    return {"notes": notes, "count": len(notes)}
+
+@router.post("/deals/{deal_id}/notes")
+async def add_note(deal_id: str, body: dict):
+    content = body.get("content","").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Note content is required")
+    note = await db.add_note(deal_id, content)
+    await db.update_last_activity(deal_id)
+    return note
+
+@router.patch("/notes/{note_id}")
+async def update_note(note_id: str, body: dict):
+    content = body.get("content","").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Note content is required")
+    note = await db.update_note(note_id, content)
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    return note
+
+@router.delete("/notes/{note_id}")
+async def delete_note(note_id: str):
+    await db.delete_note(note_id)
+    return {"deleted": True, "note_id": note_id}
+
+
+# ── Drive Links Endpoints ────────────────────────────────────────────────────
+
+@router.get("/deals/{deal_id}/drive-links")
+async def get_drive_links(deal_id: str):
+    links = await db.get_drive_links(deal_id)
+    return {"links": links, "count": len(links)}
+
+@router.post("/deals/{deal_id}/drive-links")
+async def add_drive_link(deal_id: str, body: dict):
+    label     = body.get("label","").strip()
+    url       = body.get("url","").strip()
+    file_type = body.get("file_type","document")
+    if not label or not url:
+        raise HTTPException(status_code=400, detail="Label and URL are required")
+    link = await db.add_drive_link(deal_id, label, url, file_type)
+    await db.update_last_activity(deal_id)
+    return link
+
+@router.delete("/drive-links/{link_id}")
+async def delete_drive_link(link_id: str):
+    await db.delete_drive_link(link_id)
+    return {"deleted": True, "link_id": link_id}
+
+
+# ── Social Links Endpoints ───────────────────────────────────────────────────
+
+@router.get("/deals/{deal_id}/social-links")
+async def get_social_links(deal_id: str):
+    links = await db.get_social_links(deal_id)
+    return {"links": links, "count": len(links)}
+
+@router.post("/deals/{deal_id}/social-links")
+async def add_social_link(deal_id: str, body: dict):
+    platform = body.get("platform","").strip()
+    url      = body.get("url","").strip()
+    notes    = body.get("notes","").strip()
+    if not platform or not url:
+        raise HTTPException(status_code=400, detail="Platform and URL are required")
+    link = await db.add_social_link(deal_id, platform, url, notes)
+    return link
+
+@router.patch("/social-links/{link_id}")
+async def update_social_link(link_id: str, body: dict):
+    url   = body.get("url","").strip()
+    notes = body.get("notes","")
+    link  = await db.update_social_link(link_id, url, notes)
+    if not link:
+        raise HTTPException(status_code=404, detail="Social link not found")
+    return link
+
+@router.delete("/social-links/{link_id}")
+async def delete_social_link(link_id: str):
+    await db.delete_social_link(link_id)
+    return {"deleted": True, "link_id": link_id}
+
+
+# ── Pipeline Intelligence ────────────────────────────────────────────────────
+
+@router.get("/intelligence")
+async def get_pipeline_intelligence():
+    """Full pipeline intelligence report — demographics, psychographics, velocity, win/loss."""
+    return await db.get_pipeline_intelligence()
