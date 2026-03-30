@@ -49,7 +49,7 @@ async def create_deal_manually(body: dict):
 
 @router.patch("/deals/{deal_id}/stage")
 async def update_stage(deal_id: str, stage: str):
-    valid = {"new","icp","pending_review","delivered","meeting","won"}
+    valid = {"new","icp","pending_review","delivered","meeting","won","lost","cold"}
     if stage not in valid:
         raise HTTPException(status_code=400, detail=f"Stage must be one of {valid}")
     deal = await db.advance_deal_stage(deal_id, stage)
@@ -232,7 +232,7 @@ async def download_leads_csv(deal_id: str, approved_only: bool = False):
 @router.get("/stats")
 async def get_stats():
     deals  = await db.list_deals()
-    counts = {s: 0 for s in ["new","icp","pending_review","delivered","meeting","won"]}
+    counts = {s: 0 for s in ["new","icp","pending_review","delivered","meeting","won","lost","cold"]}
     for d in deals:
         s = d.get("stage","new")
         if s in counts:
