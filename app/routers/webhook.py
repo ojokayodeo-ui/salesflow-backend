@@ -2,8 +2,17 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Header
 from app.models.schemas import InstantlyWebhookPayload
 from app.services.icp import generate_icp_segments
-from app.services.sentiment import score_reply
-from app.services.instantly import get_lead_by_email, extract_prospect_data
+try:
+    from app.services.sentiment import score_reply
+except ImportError:
+    async def score_reply(reply, name="", company=""):
+        return {"score": "warm", "reason": "Sentiment module not available", "emoji": "☀️"}
+
+try:
+    from app.services.instantly import get_lead_by_email, extract_prospect_data
+except ImportError:
+    async def get_lead_by_email(email): return {}
+    def extract_prospect_data(lead, payload): return {}
 from app.services.composer import compose_email_body
 from app.services.outlook import send_email_via_outlook
 from app.services import database as db
