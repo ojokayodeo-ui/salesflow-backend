@@ -60,13 +60,12 @@ async def update_stage(deal_id: str, stage: str):
 
 @router.delete("/deals/{deal_id}")
 async def delete_deal(deal_id: str):
-    import aiosqlite
-    from app.services.database import DB_PATH
-    async with aiosqlite.connect(DB_PATH) as conn:
-        await conn.execute("DELETE FROM leads WHERE deal_id=?", (deal_id,))
-        await conn.execute("DELETE FROM pipeline_runs WHERE deal_id=?", (deal_id,))
-        await conn.execute("DELETE FROM deals WHERE id=?", (deal_id,))
-        await conn.commit()
+    from app.services.database import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM leads WHERE deal_id=$1", deal_id)
+        await conn.execute("DELETE FROM pipeline_runs WHERE deal_id=$1", deal_id)
+        await conn.execute("DELETE FROM deals WHERE id=$1", deal_id)
     return {"deleted": True, "deal_id": deal_id}
 
 
