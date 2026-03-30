@@ -27,9 +27,10 @@ async def get_lead_by_email(email: str) -> dict:
 
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                f"{INSTANTLY_API_BASE}/leads",
-                params={"email": email, "limit": 1},
+            # Instantly v2 uses POST /leads/list with a JSON body filter
+            resp = await client.post(
+                f"{INSTANTLY_API_BASE}/leads/list",
+                json={"email": email, "limit": 1},
                 headers={
                     "Authorization": f"Bearer {settings.instantly_api_key}",
                     "Content-Type": "application/json",
@@ -38,15 +39,16 @@ async def get_lead_by_email(email: str) -> dict:
             resp.raise_for_status()
             data = resp.json()
 
-        # Instantly v2 returns {"items": [...]}
+        # Instantly v2 /leads/list returns {"items": [...]}
         items = data.get("items", [])
         if not items:
             logger.info("No lead found in Instantly for %s", email)
             return {}
 
         lead = items[0]
-        logger.info("Enriched lead from Instantly: %s at %s", 
-                   lead.get("firstName",""), lead.get("companyName",""))
+        logger.info("Enriched lead from Instantly: %s at %s",
+                   lead.get("first_name","") or lead.get("firstName",""),
+                   lead.get("company_name","") or lead.get("companyName",""))
         return lead
 
     except httpx.HTTPStatusError as exc:
@@ -64,23 +66,24 @@ def extract_prospect_data(lead: dict, payload) -> dict:
     Returns a clean dict of all prospect fields.
     Priority: Instantly API data > webhook payload fields.
     """
-    # From Instantly API
-    first_name    = lead.get("firstName") or payload.firstName or ""
-    last_name     = lead.get("lastName") or payload.lastName or ""
-    company_name  = lead.get("companyName") or payload.companyName or ""
-    company_domain= lead.get("companyDomain") or payload.companyDomain or ""
+    # From Instantly API — handle both camelCase (v1) and snake_case (v2) field names
+    first_name    = lead.get("first_name") or lead.get("firstName") or payload.firstName or ""
+    last_name     = lead.get("last_name") or lead.get("lastName") or payload.lastName or ""
+    company_name  = lead.get("company_name") or lead.get("companyName") or payload.companyName or ""
+    company_domain= lead.get("company_domain") or lead.get("companyDomain") or payload.companyDomain or ""
     website       = lead.get("website") or payload.companyWebsite or ""
-    job_title     = lead.get("personTitle") or lead.get("jobTitle") or payload.jobTitle or ""
-    linkedin      = lead.get("linkedInUrl") or lead.get("linkedIn") or payload.linkedIn or ""
+    job_title     = lead.get("job_title") or lead.get("personTitle") or lead.get("jobTitle") or payload.jobTitle or ""
+    linkedin      = lead.get("linkedin_url") or lead.get("linkedInUrl") or lead.get("linkedIn") or payload.linkedIn or ""
     location      = lead.get("city") or lead.get("location") or payload.location or ""
-    if lead.get("country") and location:
-        location = f"{location}, {lead.get('country')}"
-    elif lead.get("country"):
-        location = lead.get("country", "")
-    headcount     = str(lead.get("employeeCount") or lead.get("companyHeadCount") or payload.companyHeadCount or "")
+    country       = lead.get("country") or ""
+    if country and location:
+        location = f"{location}, {country}"
+    elif country:
+        location = country
+    headcount     = str(lead.get("employee_count") or lead.get("employeeCount") or lead.get("companyHeadCount") or payload.companyHeadCount or "")
     industry      = lead.get("industry") or payload.industry or ""
-    sub_industry  = lead.get("subIndustry") or payload.subIndustry or ""
-    description   = lead.get("companyDescription") or payload.companyDescription or ""
+    sub_industry  = lead.get("sub_industry") or lead.get("subIndustry") or payload.subIndustry or ""
+    description   = lead.get("company_description") or lead.get("companyDescription") or payload.companyDescription or ""
     headline      = lead.get("headline") or payload.headline or ""
 
     # Build full name
