@@ -51,7 +51,12 @@ CREATE TABLE IF NOT EXISTS deals (
     seq_step        INTEGER DEFAULT 1,
     seq_started     TEXT,
     seq_stopped     TEXT,
-    seq_stop_reason TEXT
+    seq_stop_reason TEXT,
+    -- Sentiment scoring
+    sentiment       TEXT DEFAULT 'warm',
+    sentiment_reason TEXT,
+    sentiment_emoji TEXT DEFAULT '☀️',
+    last_activity   TEXT
 )"""
 
 CREATE_PIPELINE_RUNS = """
@@ -93,15 +98,14 @@ CREATE TABLE IF NOT EXISTS scheduled_emails (
     step_index  INTEGER NOT NULL,
     step_subject TEXT NOT NULL,
     step_body   TEXT NOT NULL,
-    send_at     TEXT NOT NULL,  -- ISO datetime UTC when to send
+    send_at     TEXT NOT NULL,
     timezone    TEXT NOT NULL DEFAULT 'Europe/London',
-    status      TEXT NOT NULL DEFAULT 'pending',  -- pending|sent|failed|cancelled
+    status      TEXT NOT NULL DEFAULT 'pending',
     sent_at     TEXT,
     error       TEXT,
     created_at  TEXT NOT NULL,
     FOREIGN KEY (deal_id) REFERENCES deals(id)
 )"""
-
 
 
 PROSPECT_COLS = [
@@ -127,11 +131,17 @@ async def init_db():
         await db.execute(CREATE_SCHEDULED_EMAILS)
         # Add new columns if upgrading from older schema
         all_new_cols = PROSPECT_COLS + [
-            "seq_active","seq_id","seq_step","seq_started","seq_stopped","seq_stop_reason"
+            "seq_active","seq_id","seq_step","seq_started","seq_stopped","seq_stop_reason",
+            "sentiment","sentiment_reason","sentiment_emoji","last_activity",
         ]
+        col_defaults = {
+            "seq_active": "INTEGER NOT NULL DEFAULT 0",
+            "sentiment": "TEXT DEFAULT 'warm'",
+            "sentiment_emoji": "TEXT DEFAULT '☀️'",
+        }
         for col in all_new_cols:
             try:
-                defn = "INTEGER NOT NULL DEFAULT 0" if col == "seq_active" else "TEXT"
+                defn = col_defaults.get(col, "TEXT")
                 await db.execute(f"ALTER TABLE deals ADD COLUMN {col} {defn}")
             except Exception:
                 pass
@@ -155,7 +165,6 @@ async def get_deal_by_email(email: str):
 async def create_deal(
     name: str, email: str, company: str,
     domain: str = "", campaign: str = "", reply_body: str = "",
-    # Full respondent profile
     job_title: str = "", job_level: str = "", department: str = "",
     linkedin: str = "", location: str = "", headcount: str = "",
     industry: str = "", sub_industry: str = "", company_website: str = "",
@@ -170,12 +179,12 @@ async def create_deal(
                (id,created_at,updated_at,stage,name,email,company,domain,campaign,
                 reply_body,job_title,job_level,department,linkedin,location,headcount,
                 industry,sub_industry,company_website,company_desc,headline,reply_subject,
-                history_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                history_json,sentiment,sentiment_emoji,last_activity)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (deal_id, ts, ts, "new", name, email, company, domain, campaign,
              reply_body, job_title, job_level, department, linkedin, location, headcount,
              industry, sub_industry, company_website, company_desc, headline, reply_subject,
-             history),
+             history, "warm", "☀️", ts),
         )
         await db.commit()
     return await get_deal(deal_id)
@@ -222,12 +231,120 @@ async def set_deal_icp(deal_id: str, icp: dict):
         await db.commit()
 
 
+async def set_deal_sentiment(deal_id: str, sentiment: str, reason: str = "", emoji: str = "☀️"):
+    """Set sentiment score for a deal: hot | warm | cold"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE deals SET sentiment=?, sentiment_reason=?, sentiment_emoji=?, updated_at=? WHERE id=?",
+            (sentiment, reason, emoji, now_iso(), deal_id),
+        )
+        await db.commit()
+    logger.info("Sentiment set for deal %s: %s %s", deal_id, emoji, sentiment)
+
+
+async def update_last_activity(deal_id: str):
+    """Stamp last_activity to now for re-engagement tracking."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE deals SET last_activity=?, updated_at=? WHERE id=?",
+            (now_iso(), now_iso(), deal_id),
+        )
+        await db.commit()
+
+
 def _deal_row(row) -> dict:
     d = dict(row)
     d["history"]    = json.loads(d.pop("history_json", "[]"))
     d["icp"]        = json.loads(d["icp_json"]) if d.get("icp_json") else None
     d["seq_active"] = bool(d.get("seq_active", 0))
     return d
+
+
+# ── Analytics ──────────────────────────────────────────────────────────────
+
+async def get_analytics() -> dict:
+    """Return all key pipeline metrics for the dashboard."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        # Total deals and stage breakdown
+        async with db.execute("SELECT stage, COUNT(*) as cnt FROM deals GROUP BY stage") as cur:
+            stage_rows = await cur.fetchall()
+        stages = {r["stage"]: r["cnt"] for r in stage_rows}
+        total = sum(stages.values())
+
+        # Sentiment breakdown
+        async with db.execute("SELECT sentiment, COUNT(*) as cnt FROM deals GROUP BY sentiment") as cur:
+            sent_rows = await cur.fetchall()
+        sent = {r["sentiment"]: r["cnt"] for r in sent_rows}
+
+        # Meetings / won
+        meetings = stages.get("meeting", 0) + stages.get("won", 0)
+        conversion = round(meetings / total * 100) if total > 0 else 0
+
+        # Campaign breakdown with hot counts
+        async with db.execute(
+            "SELECT campaign, sentiment, COUNT(*) as cnt FROM deals WHERE campaign IS NOT NULL AND campaign != '' GROUP BY campaign, sentiment"
+        ) as cur:
+            camp_rows = await cur.fetchall()
+        camp_map = {}
+        for r in camp_rows:
+            c = r["campaign"]
+            if c not in camp_map:
+                camp_map[c] = {"name": c, "count": 0, "hot": 0}
+            camp_map[c]["count"] += r["cnt"]
+            if r["sentiment"] == "hot":
+                camp_map[c]["hot"] += r["cnt"]
+        campaigns = sorted(camp_map.values(), key=lambda x: x["count"], reverse=True)
+
+        # Avg days to call (deals that reached meeting stage)
+        async with db.execute(
+            "SELECT created_at, updated_at FROM deals WHERE stage IN ('meeting','won')"
+        ) as cur:
+            timing_rows = await cur.fetchall()
+        if timing_rows:
+            from datetime import datetime
+            deltas = []
+            for r in timing_rows:
+                try:
+                    c = datetime.fromisoformat(r["created_at"])
+                    u = datetime.fromisoformat(r["updated_at"])
+                    deltas.append((u - c).days)
+                except Exception:
+                    pass
+            avg_days = round(sum(deltas) / len(deltas)) if deltas else 0
+        else:
+            avg_days = 0
+
+    return {
+        "total_replies":    total,
+        "meetings_booked":  meetings,
+        "conversion_rate":  conversion,
+        "avg_days_to_call": avg_days,
+        "hot_leads":        sent.get("hot", 0),
+        "warm_leads":       sent.get("warm", 0),
+        "cold_leads":       sent.get("cold", 0),
+        "stages":           stages,
+        "campaigns":        campaigns,
+    }
+
+
+async def get_idle_deals(days: int = 7) -> list[dict]:
+    """Return deals with no activity for more than `days` days."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM deals
+               WHERE stage NOT IN ('won','meeting','delivered')
+               AND (last_activity IS NULL OR last_activity < ?)
+               AND created_at < ?
+               ORDER BY created_at ASC""",
+            (cutoff, cutoff),
+        ) as cur:
+            rows = await cur.fetchall()
+    return [_deal_row(r) for r in rows]
 
 
 # ── Sequence management ─────────────────────────────────────────────────────
@@ -366,7 +483,6 @@ async def schedule_email(
     subject: str, body: str, send_at_utc: str,
     timezone: str = "Europe/London",
 ) -> str:
-    """Schedule an email to be sent at a specific UTC datetime."""
     email_id = new_id()
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -383,7 +499,6 @@ async def schedule_email(
 
 
 async def get_due_emails() -> list[dict]:
-    """Return all pending emails whose send_at time has passed."""
     now = now_iso()
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -414,7 +529,6 @@ async def mark_email_failed(email_id: str, error: str):
 
 
 async def cancel_scheduled_emails(deal_id: str):
-    """Cancel all pending scheduled emails for a deal (e.g. when sequence stops)."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "UPDATE scheduled_emails SET status='cancelled' WHERE deal_id=? AND status='pending'",
