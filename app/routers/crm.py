@@ -518,3 +518,90 @@ async def _send_leads_to_prospect_bg(
         logger.info("Leads sent to prospect %s — deal advanced to delivered", deal["email"])
     else:
         logger.error("Failed to send leads to %s: %s", deal["email"], result.get("error"))
+
+
+@router.post("/draft-email-quick")
+async def draft_email_quick(body: dict):
+    """
+    Draft a lead delivery email using Claude AI.
+    No database lookup needed — accepts context directly.
+    Body: { "name": "...", "company": "...", "email": "...",
+            "pain_point": "...", "industry": "...", "lead_count": 100,
+            "sender_name": "...", "calendly_link": "...",
+            "template": "warm|direct|ai", "custom_note": "..." }
+    """
+    from app.config import settings
+    import httpx, json as _json
+
+    name        = body.get("name", "there")
+    company     = body.get("company", "your company")
+    pain_point  = body.get("pain_point", "")
+    industry    = body.get("industry", "consulting")
+    lead_count  = body.get("lead_count", 100)
+    sender_name = body.get("sender_name") or settings.default_from_name or "Kayode"
+    calendly    = body.get("calendly_link", "")
+    template    = body.get("template", "ai")
+    custom_note = body.get("custom_note", "")
+    first_name  = name.split()[0] if name else "there"
+
+    # Warm and Direct are instant — no Claude call needed
+    if template == "warm":
+        email_body = f"""Hi {first_name},
+
+As promised, please find your targeted lead list attached — {lead_count} verified contacts matched specifically to {company}'s ideal client profile.
+
+Each contact has been filtered for {industry} firms most likely to need your services right now{(' — particularly those facing ' + pain_point.lower()) if pain_point else ''}.
+
+To get the most from this list, I'd recommend prioritising the first 20–30 contacts and reaching out within the next 48 hours while the list is fresh.
+
+If you'd like to jump on a quick call to walk through how to work these leads most effectively, you can grab a slot here:
+{calendly or '[your-calendly-link]'}
+
+Looking forward to hearing how it goes.
+
+{sender_name}"""
+        return {"subject": f"Your targeted lead list — {company}", "body": email_body}
+
+    if template == "direct":
+        email_body = f"""Hi {first_name},
+
+Attached is your {lead_count}-contact lead list for {company}.
+
+These are verified, targeted contacts in {industry}. Work through the list systematically — aim for 20 outreach attempts per day for best results.
+
+Questions? Reply to this email or book a call: {calendly or '[your-calendly-link]'}
+
+{sender_name}"""
+        return {"subject": f"Your targeted lead list — {company}", "body": email_body}
+
+    # AI template — call Claude
+    prompt = f"""You are writing a professional lead delivery email on behalf of {sender_name}, who runs a B2B lead generation service.
+
+The email is being sent to {name} at {company}.
+They replied positively to a cold email and are now receiving a targeted list of {lead_count} leads in the {industry} space.
+{f"Their main pain point: {pain_point}" if pain_point else ""}
+{f"Include this Calendly link naturally: {calendly}" if calendly else ""}
+
+Write a warm, professional email delivering the lead list. 3 short paragraphs. No subject line. No placeholder text. Sign off as {sender_name}. Make it feel personal and excited about their results.{(chr(10) + chr(10) + "Also incorporate this personal note from the sender: " + custom_note) if custom_note else ""}"""
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "Content-Type": "application/json",
+                    "x-api-key": settings.anthropic_api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 500,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+        data = resp.json()
+        email_body = data["content"][0]["text"].strip()
+        return {"subject": f"Your targeted lead list — {company}", "body": email_body}
+    except Exception as exc:
+        logger.error("AI draft failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"AI draft failed: {str(exc)}")
