@@ -3,19 +3,15 @@ import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import email, webhook, pipeline, crm
-try:
-    from app.routers import calendly, analytics
-    HAS_NEW_ROUTERS = True
-except ImportError:
-    HAS_NEW_ROUTERS = False
-from app.services.database import init_db
+from app.routers import email, webhook, pipeline, crm, calendly, analytics
+from app.services.database import init_db, ensure_extra_tables
 from app.services.scheduler import run_scheduler
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await ensure_extra_tables()
     # Start the email scheduler as a background task
     scheduler_task = asyncio.create_task(run_scheduler())
     yield
@@ -44,9 +40,8 @@ app.include_router(email.router,    prefix="/api/email",    tags=["Email"])
 app.include_router(webhook.router,  prefix="/api/webhook",  tags=["Webhooks"])
 app.include_router(pipeline.router, prefix="/api/pipeline", tags=["Pipeline"])
 app.include_router(crm.router,      prefix="/api/crm",      tags=["CRM"])
-if HAS_NEW_ROUTERS:
-    app.include_router(calendly.router,  prefix="/api/calendly",  tags=["Calendly"])
-    app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"])
+app.include_router(calendly.router,  prefix="/api/calendly",  tags=["Calendly"])
+app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"])
 
 
 @app.get("/")
