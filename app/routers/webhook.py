@@ -259,6 +259,19 @@ View deal: https://your-netlify-app.netlify.app (CRM tab)
     logger.info("=== Pipeline complete for %s ===", prospect.company)
 
 
+@router.get("/debug-enrich/{email}")
+async def debug_enrich(email: str):
+    """Debug endpoint — manually test Instantly enrichment for an email address."""
+    from app.services.instantly import get_lead_by_email, extract_prospect_data
+    lead_data = await get_lead_by_email(email)
+    if not lead_data:
+        return {"found": False, "email": email, "message": "No lead found in Instantly"}
+    from app.models.schemas import InstantlyWebhookPayload
+    dummy_payload = InstantlyWebhookPayload(email=email)
+    extracted = extract_prospect_data(lead_data, dummy_payload)
+    return {"found": True, "raw_lead": lead_data, "extracted": extracted}
+
+
 @router.post("/instantly")
 async def receive_instantly_webhook(
     payload: InstantlyWebhookPayload,
@@ -271,6 +284,12 @@ async def receive_instantly_webhook(
     event          = payload.get_event()
 
     logger.info("Webhook received: event=%s email=%s", event, prospect_email)
+    # Log full raw payload for debugging (first 1000 chars)
+    import json as _json
+    try:
+        logger.info("Raw webhook payload: %s", _json.dumps(payload.model_dump(), default=str)[:1000])
+    except Exception:
+        pass
 
     # ── Idempotency check — block duplicate webhooks within 120s ─────────────
     if event in POSITIVE_EVENTS and prospect_email:
