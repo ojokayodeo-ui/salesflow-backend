@@ -673,7 +673,7 @@ async def import_from_instantly(body: dict = {}):
 
     # ── Step 1: Fetch replied leads from Instantly ───────────────────────────
     try:
-        request_body = {"limit": limit, "reply_status": ["replied"]}
+        request_body = {"limit": limit}
         if campaign_id:
             request_body["campaign_id"] = campaign_id
 
@@ -695,27 +695,6 @@ async def import_from_instantly(body: dict = {}):
     except Exception as exc:
         logger.error("Instantly import fetch failed: %s", exc)
         raise HTTPException(status_code=502, detail=f"Instantly API error: {str(exc)}")
-
-    if not leads:
-        # Try without reply_status filter as fallback
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                fb_body = {"limit": limit}
-                if campaign_id:
-                    fb_body["campaign_id"] = campaign_id
-                resp = await client.post(
-                    f"{INSTANTLY_API_BASE}/leads/list",
-                    json=fb_body,
-                    headers={
-                        "Authorization": f"Bearer {settings.instantly_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                )
-                resp.raise_for_status()
-                leads = resp.json().get("items", [])
-            logger.info("Instantly import fallback: fetched %d leads", len(leads))
-        except Exception as exc:
-            logger.warning("Instantly import fallback failed: %s", exc)
 
     # ── Step 2: Process each lead ────────────────────────────────────────────
     imported = []
