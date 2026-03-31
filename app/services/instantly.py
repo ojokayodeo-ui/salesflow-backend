@@ -76,26 +76,51 @@ def extract_prospect_data(lead: dict, payload) -> dict:
     Merge Instantly API lead data with webhook payload.
     Returns a clean dict of all prospect fields.
     Priority: Instantly API data > webhook payload fields.
+    Handles both snake_case (v2) and camelCase (v1) field names from both sources.
     """
-    # From Instantly API — handle both camelCase (v1) and snake_case (v2) field names
-    first_name    = lead.get("first_name") or lead.get("firstName") or payload.firstName or ""
-    last_name     = lead.get("last_name") or lead.get("lastName") or payload.lastName or ""
-    company_name  = lead.get("company_name") or lead.get("companyName") or payload.companyName or ""
-    company_domain= lead.get("company_domain") or lead.get("companyDomain") or payload.companyDomain or ""
-    website       = lead.get("website") or payload.companyWebsite or ""
-    job_title     = lead.get("job_title") or lead.get("personTitle") or lead.get("jobTitle") or payload.jobTitle or ""
-    linkedin      = lead.get("linkedin_url") or lead.get("linkedInUrl") or lead.get("linkedIn") or payload.linkedIn or ""
-    location      = lead.get("city") or lead.get("location") or payload.location or ""
-    country       = lead.get("country") or ""
-    if country and location:
-        location = f"{location}, {country}"
-    elif country:
-        location = country
-    headcount     = str(lead.get("employee_count") or lead.get("employeeCount") or lead.get("companyHeadCount") or payload.companyHeadCount or "")
-    industry      = lead.get("industry") or payload.industry or ""
-    sub_industry  = lead.get("sub_industry") or lead.get("subIndustry") or payload.subIndustry or ""
-    description   = lead.get("company_description") or lead.get("companyDescription") or payload.companyDescription or ""
-    headline      = lead.get("headline") or payload.headline or ""
+    def p(attr):
+        """Safely get attribute from payload, trying snake_case and camelCase variants."""
+        return getattr(payload, attr, None) or ""
+
+    # Names
+    first_name   = lead.get("first_name") or lead.get("firstName") or p("first_name") or p("firstName")
+    last_name    = lead.get("last_name")  or lead.get("lastName")  or p("last_name")  or p("lastName")
+
+    # Company
+    company_name  = lead.get("company_name")   or lead.get("companyName")   or p("company_name")   or p("companyName")
+    company_domain= lead.get("company_domain") or lead.get("companyDomain") or p("company_domain") or p("companyDomain")
+    website       = lead.get("website") or lead.get("company_website") or lead.get("companyWebsite") or p("company_website") or p("companyWebsite") or p("website")
+
+    # Job
+    job_title = lead.get("job_title") or lead.get("personTitle") or lead.get("jobTitle") or p("job_title") or p("jobTitle")
+    job_level = lead.get("job_level") or lead.get("jobLevel") or p("job_level") or p("jobLevel")
+    department= lead.get("department") or p("department")
+
+    # Social
+    linkedin  = lead.get("linkedin_url") or lead.get("linkedInUrl") or lead.get("linkedIn") or p("linkedin_url") or p("linkedIn")
+
+    # Location — build from parts if flat field missing
+    location  = lead.get("location") or p("location") or ""
+    if not location:
+        city    = lead.get("city")    or p("city")    or ""
+        state   = lead.get("state")   or p("state")   or ""
+        country = lead.get("country") or p("country") or ""
+        parts   = [x for x in [city, state, country] if x]
+        location = ", ".join(parts)
+    elif lead.get("country") and lead["country"] not in location:
+        location = f"{location}, {lead['country']}"
+
+    # Company size
+    headcount = str(
+        lead.get("employee_count") or lead.get("employeeCount") or
+        lead.get("companyHeadCount") or p("employee_count") or p("companyHeadCount") or ""
+    )
+
+    # Industry
+    industry     = lead.get("industry")     or p("industry")     or ""
+    sub_industry = lead.get("sub_industry") or lead.get("subIndustry") or p("sub_industry") or p("subIndustry") or ""
+    description  = lead.get("company_description") or lead.get("companyDescription") or p("company_description") or p("companyDescription") or ""
+    headline     = lead.get("headline") or p("headline") or ""
 
     # Build full name
     full_name = f"{first_name} {last_name}".strip()
