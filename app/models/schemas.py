@@ -20,28 +20,56 @@ class EmailResponse(BaseModel):
 
 
 class InstantlyWebhookPayload(BaseModel):
-    """Matches Instantly.ai's actual flat webhook payload format."""
+    """Matches Instantly.ai v2 webhook payload — handles both snake_case and camelCase fields."""
+    # Event metadata
     event_type:         Optional[str] = None
     event:              Optional[str] = None
     timestamp:          Optional[str] = None
-    firstName:          Optional[str] = None
-    lastName:           Optional[str] = None
+
+    # Prospect identity — snake_case (Instantly v2)
+    first_name:         Optional[str] = None
+    last_name:          Optional[str] = None
     email:              Optional[str] = None
     lead_email:         Optional[str] = None
+    job_title:          Optional[str] = None
+    job_level:          Optional[str] = None
+    department:         Optional[str] = None
+    linkedin_url:       Optional[str] = None
+    phone:              Optional[str] = None
+    city:               Optional[str] = None
+    country:            Optional[str] = None
+    state:              Optional[str] = None
+    location:           Optional[str] = None
+    headline:           Optional[str] = None
+    summary:            Optional[str] = None
+
+    # Prospect identity — camelCase (Instantly v1 / legacy)
+    firstName:          Optional[str] = None
+    lastName:           Optional[str] = None
     jobTitle:           Optional[str] = None
     jobLevel:           Optional[str] = None
-    department:         Optional[str] = None
     linkedIn:           Optional[str] = None
-    location:           Optional[str] = None
+
+    # Company — snake_case (Instantly v2)
+    company_name:       Optional[str] = None
+    company_domain:     Optional[str] = None
+    company_website:    Optional[str] = None
+    company_linkedin_url: Optional[str] = None
+    employee_count:     Optional[str] = None
+    industry:           Optional[str] = None
+    sub_industry:       Optional[str] = None
+    company_description: Optional[str] = None
+    website:            Optional[str] = None
+
+    # Company — camelCase (Instantly v1 / legacy)
     companyName:        Optional[str] = None
     companyDomain:      Optional[str] = None
     companyWebsite:     Optional[str] = None
     companyHeadCount:   Optional[str] = None
     companyDescription: Optional[str] = None
-    industry:           Optional[str] = None
     subIndustry:        Optional[str] = None
-    summary:            Optional[str] = None
-    headline:           Optional[str] = None
+
+    # Campaign & reply
     campaign:           Optional[str] = None
     campaign_id:        Optional[str] = None
     campaign_name:      Optional[str] = None
@@ -53,23 +81,23 @@ class InstantlyWebhookPayload(BaseModel):
     model_config = {"extra": "allow"}
 
     def get_prospect_name(self) -> str:
-        first = self.firstName or ""
-        last  = self.lastName or ""
+        first = self.first_name or self.firstName or ""
+        last  = self.last_name  or self.lastName  or ""
         return f"{first} {last}".strip() or "Unknown"
 
     def get_prospect_email(self) -> str:
         return self.email or self.lead_email or ""
 
     def get_company(self) -> str:
-        return self.companyName or ""
+        return self.company_name or self.companyName or ""
 
     def get_domain(self) -> str:
-        domain = self.companyDomain or self.companyWebsite or ""
+        domain = self.company_domain or self.companyDomain or self.company_website or self.companyWebsite or ""
         domain = domain.replace("https://", "").replace("http://", "").replace("www.", "")
         return domain.rstrip("/")
 
     def get_website(self) -> str:
-        w = self.companyWebsite or ""
+        w = self.company_website or self.companyWebsite or self.website or ""
         if w and not w.startswith("http"):
             w = "https://" + w
         return w
@@ -84,20 +112,28 @@ class InstantlyWebhookPayload(BaseModel):
         return self.reply_text or self.reply_text_snippet or ""
 
     def to_prospect_data(self) -> "ProspectData":
+        # Build location from city/country/state if flat location field is empty
+        location = self.location or ""
+        if not location:
+            parts = [p for p in [self.city, self.state, self.country] if p]
+            location = ", ".join(parts)
+
         return ProspectData(
             name        = self.get_prospect_name(),
             email       = self.get_prospect_email(),
             company     = self.get_company(),
             domain      = self.get_domain(),
             website     = self.get_website(),
-            job_title   = self.jobTitle or "",
-            linkedin    = self.linkedIn or "",
-            location    = self.location or "",
-            headcount   = self.companyHeadCount or "",
-            industry    = self.industry or "",
-            sub_industry= self.subIndustry or "",
-            description = self.companyDescription or "",
-            headline    = self.headline or "",
+            job_title   = self.job_title   or self.jobTitle   or "",
+            job_level   = self.job_level   or self.jobLevel   or "",
+            linkedin    = self.linkedin_url or self.linkedIn   or "",
+            location    = location,
+            headcount   = self.employee_count or self.companyHeadCount or "",
+            industry    = self.industry    or "",
+            sub_industry= self.sub_industry or self.subIndustry or "",
+            description = self.company_description or self.companyDescription or "",
+            headline    = self.headline    or "",
+            department  = self.department  or "",
         )
 
 
@@ -108,6 +144,7 @@ class ProspectData(BaseModel):
     domain:       Optional[str] = None
     website:      Optional[str] = None
     job_title:    Optional[str] = None
+    job_level:    Optional[str] = None
     linkedin:     Optional[str] = None
     location:     Optional[str] = None
     headcount:    Optional[str] = None
@@ -115,6 +152,7 @@ class ProspectData(BaseModel):
     sub_industry: Optional[str] = None
     description:  Optional[str] = None
     headline:     Optional[str] = None
+    department:   Optional[str] = None
 
 
 class ICPData(BaseModel):
