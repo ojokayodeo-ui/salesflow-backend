@@ -133,6 +133,35 @@ async def _run_pipeline_inner(payload: InstantlyWebhookPayload):
                 )
                 logger.info("Enriched prospect: %s at %s (%s)",
                             prospect.name, prospect.company, prospect.job_title)
+            else:
+                # No lead found via API — try extracting from payload's extra fields
+                # Instantly sometimes puts data in custom_variables or top-level extra fields
+                extra = {}
+                if hasattr(payload, "model_extra") and payload.model_extra:
+                    extra = payload.model_extra
+                if extra:
+                    from app.services.instantly import extract_prospect_data
+                    enriched = extract_prospect_data(extra, payload)
+                    from app.models.schemas import ProspectData
+                    prospect = ProspectData(
+                        name         = enriched["name"] or prospect.name,
+                        email        = email,
+                        company      = enriched["company"] or prospect.company,
+                        domain       = enriched["domain"] or prospect.domain,
+                        website      = enriched["website"] or prospect.website,
+                        job_title    = enriched["job_title"] or prospect.job_title,
+                        job_level    = enriched["job_level"] or prospect.job_level,
+                        linkedin     = enriched["linkedin"] or prospect.linkedin,
+                        location     = enriched["location"] or prospect.location,
+                        headcount    = enriched["headcount"] or prospect.headcount,
+                        industry     = enriched["industry"] or prospect.industry,
+                        sub_industry = enriched["sub_industry"] or prospect.sub_industry,
+                        description  = enriched["description"] or prospect.description,
+                        headline     = enriched["headline"] or prospect.headline,
+                        department   = enriched["department"] or prospect.department,
+                    )
+                    logger.info("Enriched from webhook extra fields: %s at %s",
+                                prospect.name, prospect.company)
         except Exception as exc:
             logger.warning("Instantly enrichment failed for %s: %s", email, exc)
 
