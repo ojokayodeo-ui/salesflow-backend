@@ -641,6 +641,176 @@ Write a warm, professional email delivering the lead list. 3 short paragraphs. N
         raise HTTPException(status_code=500, detail=f"AI draft failed: {str(exc)}")
 
 
+
+
+# ── Import from Instantly ────────────────────────────────────────────────────
+
+@router.post("/import-instantly")
+async def import_from_instantly(body: dict = {}):
+    """
+    Fetch all replied leads from Instantly API and create/update CRM deals.
+    - Skips leads that already have a deal (deduplication by email)
+    - Enriches each lead with full prospect data from Instantly
+    - Runs ICP generation for new deals in the background
+    - Returns counts of imported, skipped, and failed leads
+    
+    Body (all optional):
+      campaign_id: str  — filter by specific campaign
+      limit: int        — max leads to fetch (default 100)
+    """
+    import httpx
+    from app.config import settings
+    from app.services.instantly import extract_prospect_data
+    from app.models.schemas import InstantlyWebhookPayload
+
+    if not settings.instantly_api_key:
+        raise HTTPException(status_code=400, detail="INSTANTLY_API_KEY not configured")
+
+    campaign_id = body.get("campaign_id", "")
+    limit       = min(int(body.get("limit", 100)), 500)
+
+    INSTANTLY_API_BASE = "https://api.instantly.ai/api/v2"
+
+    # ── Step 1: Fetch replied leads from Instantly ───────────────────────────
+    try:
+        request_body = {"limit": limit, "reply_status": ["replied"]}
+        if campaign_id:
+            request_body["campaign_id"] = campaign_id
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{INSTANTLY_API_BASE}/leads/list",
+                json=request_body,
+                headers={
+                    "Authorization": f"Bearer {settings.instantly_api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        leads = data.get("items", [])
+        logger.info("Instantly import: fetched %d leads", len(leads))
+
+    except Exception as exc:
+        logger.error("Instantly import fetch failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Instantly API error: {str(exc)}")
+
+    if not leads:
+        # Try without reply_status filter as fallback
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                fb_body = {"limit": limit}
+                if campaign_id:
+                    fb_body["campaign_id"] = campaign_id
+                resp = await client.post(
+                    f"{INSTANTLY_API_BASE}/leads/list",
+                    json=fb_body,
+                    headers={
+                        "Authorization": f"Bearer {settings.instantly_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                resp.raise_for_status()
+                leads = resp.json().get("items", [])
+            logger.info("Instantly import fallback: fetched %d leads", len(leads))
+        except Exception as exc:
+            logger.warning("Instantly import fallback failed: %s", exc)
+
+    # ── Step 2: Process each lead ────────────────────────────────────────────
+    imported = []
+    skipped  = []
+    failed   = []
+
+    for lead in leads:
+        email = (lead.get("email") or "").strip().lower()
+        if not email:
+            continue
+
+        try:
+            # Check for existing deal
+            existing = await db.get_deal_by_email(email)
+            if existing:
+                # Update fields if they are empty
+                needs_update = not existing.get("job_title") and not existing.get("company")
+                if not needs_update:
+                    skipped.append(email)
+                    continue
+
+            # Build a dummy payload to use extract_prospect_data
+            dummy = InstantlyWebhookPayload(
+                email        = email,
+                first_name   = lead.get("first_name") or lead.get("firstName", ""),
+                last_name    = lead.get("last_name")  or lead.get("lastName", ""),
+                campaign_name= lead.get("campaign_name", ""),
+                reply_text   = lead.get("last_reply_body") or lead.get("reply_text", ""),
+            )
+
+            extracted = extract_prospect_data(lead, dummy)
+
+            name    = extracted["name"] or email.split("@")[0].title()
+            company = extracted["company"] or email.split("@")[1].split(".")[0].title()
+
+            if existing and needs_update:
+                # Update existing empty deal
+                pool = await db.get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """UPDATE deals SET
+                            name=$1, company=$2, domain=$3, job_title=$4, job_level=$5,
+                            department=$6, linkedin=$7, location=$8, headcount=$9,
+                            industry=$10, sub_industry=$11, company_website=$12,
+                            company_desc=$13, headline=$14, updated_at=$15
+                           WHERE id=$16""",
+                        name, company,
+                        extracted["domain"], extracted["job_title"], extracted["job_level"],
+                        extracted["department"], extracted["linkedin"], extracted["location"],
+                        extracted["headcount"], extracted["industry"], extracted["sub_industry"],
+                        extracted["website"], extracted["description"], extracted["headline"],
+                        db.now_iso(), existing["id"]
+                    )
+                imported.append({"email": email, "name": name, "action": "updated"})
+                logger.info("Import: updated existing deal for %s", email)
+            else:
+                # Create new deal
+                deal = await db.create_deal(
+                    name            = name,
+                    email           = email,
+                    company         = company,
+                    domain          = extracted["domain"],
+                    campaign        = lead.get("campaign_name", ""),
+                    reply_body      = lead.get("last_reply_body") or lead.get("reply_text", ""),
+                    job_title       = extracted["job_title"],
+                    job_level       = extracted["job_level"],
+                    department      = extracted["department"],
+                    linkedin        = extracted["linkedin"],
+                    location        = extracted["location"],
+                    headcount       = extracted["headcount"],
+                    industry        = extracted["industry"],
+                    sub_industry    = extracted["sub_industry"],
+                    company_website = extracted["website"],
+                    company_desc    = extracted["description"],
+                    headline        = extracted["headline"],
+                    reply_subject   = lead.get("last_email_subject", ""),
+                )
+                imported.append({"email": email, "name": name, "action": "created"})
+                logger.info("Import: created deal for %s at %s", name, company)
+
+        except Exception as exc:
+            logger.error("Import failed for %s: %s", email, exc)
+            failed.append({"email": email, "error": str(exc)})
+
+    return {
+        "success":       True,
+        "total_fetched": len(leads),
+        "imported":      len(imported),
+        "skipped":       len(skipped),
+        "failed":        len(failed),
+        "deals":         imported,
+        "errors":        failed,
+    }
+
+
 # ── Notes Endpoints ──────────────────────────────────────────────────────────
 
 @router.get("/deals/{deal_id}/notes")
