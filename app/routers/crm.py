@@ -672,36 +672,54 @@ async def import_from_instantly(body: dict = {}):
     INSTANTLY_API_BASE = "https://api.instantly.ai/api/v2"
 
     # ── Step 1: Fetch leads from Instantly ──────────────────────────────────
+    # Official Instantly v2 docs: POST /api/v2/leads/list with empty body {}
+    # Paginates using starting_after cursor
     leads = []
     try:
-        # POST /api/v2/leads/list with empty search returns all leads
-        request_body: dict = {"search": "", "limit": limit}
+        request_body: dict = {}
         if campaign_id:
-            request_body["campaign_id"] = campaign_id
+            request_body["filter"] = {"campaign_id": campaign_id}
+
+        all_leads = []
+        starting_after = None
+        fetched = 0
 
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{INSTANTLY_API_BASE}/leads/list",
-                json=request_body,
-                headers={
-                    "Authorization": f"Bearer {settings.instantly_api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            # Log response for debugging
-            logger.info("Instantly /leads/list status: %s", resp.status_code)
-            if resp.status_code >= 400:
-                logger.error("Instantly error body: %s", resp.text[:300])
-            resp.raise_for_status()
-            data = resp.json()
+            while fetched < limit:
+                body = dict(request_body)
+                if starting_after:
+                    body["starting_after"] = starting_after
 
-        # Handle both list and paginated responses
-        if isinstance(data, list):
-            leads = data
-        else:
-            leads = data.get("items", data.get("leads", data.get("data", [])))
+                resp = await client.post(
+                    f"{INSTANTLY_API_BASE}/leads/list",
+                    json=body,
+                    headers={
+                        "Authorization": f"Bearer {settings.instantly_api_key}",
+                        "Content-Type": "application/json",
+                    },
+                )
+                logger.info("Instantly /leads/list status: %s", resp.status_code)
+                if resp.status_code >= 400:
+                    logger.error("Instantly error: %s", resp.text[:300])
+                resp.raise_for_status()
+                data = resp.json()
 
-        logger.info("Instantly import: fetched %d leads", len(leads))
+                page_leads = data.get("items", [])
+                if not page_leads:
+                    break
+
+                all_leads.extend(page_leads)
+                fetched += len(page_leads)
+
+                # Paginate using last item id as cursor
+                if len(page_leads) < 100:
+                    break  # last page
+                starting_after = page_leads[-1].get("id")
+                if not starting_after:
+                    break
+
+        leads = all_leads[:limit]
+        logger.info("Instantly import: fetched %d leads total", len(leads))
 
     except httpx.HTTPStatusError as exc:
         logger.error("Instantly API %s: %s", exc.response.status_code, exc.response.text[:300])
