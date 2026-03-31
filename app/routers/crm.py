@@ -643,20 +643,14 @@ Write a warm, professional email delivering the lead list. 3 short paragraphs. N
 
 
 
-# ── Import from Instantly ────────────────────────────────────────────────────
+# ── Enrich existing deals from Instantly ────────────────────────────────────
 
-@router.post("/import-instantly")
-async def import_from_instantly(body: dict = {}):
+@router.post("/enrich-deals")
+async def enrich_deals_from_instantly():
     """
-    Fetch all replied leads from Instantly API and create/update CRM deals.
-    - Skips leads that already have a deal (deduplication by email)
-    - Enriches each lead with full prospect data from Instantly
-    - Runs ICP generation for new deals in the background
-    - Returns counts of imported, skipped, and failed leads
-    
-    Body (all optional):
-      campaign_id: str  — filter by specific campaign
-      limit: int        — max leads to fetch (default 100)
+    For every existing CRM deal that is missing prospect data,
+    fetch the full lead profile from Instantly by email and fill in the gaps.
+    Does NOT create new deals — only enriches existing ones.
     """
     import httpx
     from app.config import settings
@@ -666,159 +660,116 @@ async def import_from_instantly(body: dict = {}):
     if not settings.instantly_api_key:
         raise HTTPException(status_code=400, detail="INSTANTLY_API_KEY not configured")
 
-    campaign_id = body.get("campaign_id", "")
-    limit       = min(int(body.get("limit", 100)), 500)
+    # Get all existing deals
+    all_deals = await db.list_deals()
+    if not all_deals:
+        return {"success": True, "message": "No deals to enrich", "enriched": 0, "skipped": 0}
+
+    # Only process deals missing key fields
+    incomplete = [
+        d for d in all_deals
+        if not d.get("job_title") or not d.get("location") or not d.get("industry")
+    ]
+
+    logger.info("Enriching %d incomplete deals out of %d total", len(incomplete), len(all_deals))
+
+    enriched = []
+    skipped  = []
+    failed   = []
 
     INSTANTLY_API_BASE = "https://api.instantly.ai/api/v2"
 
-    # ── Step 1: Fetch leads from Instantly ──────────────────────────────────
-    # Official Instantly v2 docs: POST /api/v2/leads/list with empty body {}
-    # Paginates using starting_after cursor
-    leads = []
-    try:
-        request_body: dict = {}
-        if campaign_id:
-            request_body["filter"] = {"campaign_id": campaign_id}
+    for deal in incomplete:
+        email = (deal.get("email") or "").strip().lower()
+        if not email:
+            continue
 
-        all_leads = []
-        starting_after = None
-        fetched = 0
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            while fetched < limit:
-                body = dict(request_body)
-                if starting_after:
-                    body["starting_after"] = starting_after
-
+        try:
+            # Fetch lead from Instantly by email
+            async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
                     f"{INSTANTLY_API_BASE}/leads/list",
-                    json=body,
+                    json={"filter": {"email": email}},
                     headers={
                         "Authorization": f"Bearer {settings.instantly_api_key}",
                         "Content-Type": "application/json",
                     },
                 )
-                logger.info("Instantly /leads/list status: %s", resp.status_code)
-                if resp.status_code >= 400:
-                    logger.error("Instantly error: %s", resp.text[:300])
                 resp.raise_for_status()
                 data = resp.json()
 
-                page_leads = data.get("items", [])
-                if not page_leads:
-                    break
-
-                all_leads.extend(page_leads)
-                fetched += len(page_leads)
-
-                # Paginate using last item id as cursor
-                if len(page_leads) < 100:
-                    break  # last page
-                starting_after = page_leads[-1].get("id")
-                if not starting_after:
-                    break
-
-        leads = all_leads[:limit]
-        logger.info("Instantly import: fetched %d leads total", len(leads))
-
-    except httpx.HTTPStatusError as exc:
-        logger.error("Instantly API %s: %s", exc.response.status_code, exc.response.text[:300])
-        raise HTTPException(status_code=502, detail=f"Instantly API error {exc.response.status_code}: {exc.response.text[:200]}")
-    except Exception as exc:
-        logger.error("Instantly import fetch failed: %s", exc)
-        raise HTTPException(status_code=502, detail=f"Instantly API error: {str(exc)}")
-
-    # ── Step 2: Process each lead ────────────────────────────────────────────
-    imported = []
-    skipped  = []
-    failed   = []
-
-    for lead in leads:
-        email = (lead.get("email") or "").strip().lower()
-        if not email:
-            continue
-
-        try:
-            # Check for existing deal
-            existing = await db.get_deal_by_email(email)
-            if existing:
-                # Update fields if they are empty
-                needs_update = not existing.get("job_title") and not existing.get("company")
-                if not needs_update:
-                    skipped.append(email)
-                    continue
-
-            # Build a dummy payload to use extract_prospect_data
-            dummy = InstantlyWebhookPayload(
-                email        = email,
-                first_name   = lead.get("first_name") or lead.get("firstName", ""),
-                last_name    = lead.get("last_name")  or lead.get("lastName", ""),
-                campaign_name= lead.get("campaign_name", ""),
-                reply_text   = lead.get("last_reply_body") or lead.get("reply_text", ""),
+            items = data.get("items", [])
+            # Find exact email match
+            lead = next(
+                (i for i in items if (i.get("email") or "").lower() == email),
+                None
             )
 
+            if not lead:
+                logger.info("No Instantly data found for %s — skipping", email)
+                skipped.append(email)
+                continue
+
+            # Extract fields
+            dummy = InstantlyWebhookPayload(email=email)
             extracted = extract_prospect_data(lead, dummy)
 
-            name    = extracted["name"] or email.split("@")[0].title()
-            company = extracted["company"] or email.split("@")[1].split(".")[0].title()
+            # Only update fields that are currently empty
+            updates = {}
+            field_map = {
+                "job_title":       extracted["job_title"],
+                "job_level":       extracted["job_level"],
+                "department":      extracted["department"],
+                "linkedin":        extracted["linkedin"],
+                "location":        extracted["location"],
+                "headcount":       extracted["headcount"],
+                "industry":        extracted["industry"],
+                "sub_industry":    extracted["sub_industry"],
+                "company_website": extracted["website"],
+                "company_desc":    extracted["description"],
+                "headline":        extracted["headline"],
+                "domain":          extracted["domain"],
+            }
+            # Also update name/company if they look like email-derived placeholders
+            if extracted["company"] and (not deal.get("company") or len(deal.get("company","")) < 4):
+                updates["company"] = extracted["company"]
+            if extracted["name"] and deal.get("name","").replace(" ","").lower() == email.split("@")[0].replace(".","").lower():
+                updates["name"] = extracted["name"]
 
-            if existing and needs_update:
-                # Update existing empty deal
-                pool = await db.get_pool()
-                async with pool.acquire() as conn:
-                    await conn.execute(
-                        """UPDATE deals SET
-                            name=$1, company=$2, domain=$3, job_title=$4, job_level=$5,
-                            department=$6, linkedin=$7, location=$8, headcount=$9,
-                            industry=$10, sub_industry=$11, company_website=$12,
-                            company_desc=$13, headline=$14, updated_at=$15
-                           WHERE id=$16""",
-                        name, company,
-                        extracted["domain"], extracted["job_title"], extracted["job_level"],
-                        extracted["department"], extracted["linkedin"], extracted["location"],
-                        extracted["headcount"], extracted["industry"], extracted["sub_industry"],
-                        extracted["website"], extracted["description"], extracted["headline"],
-                        db.now_iso(), existing["id"]
-                    )
-                imported.append({"email": email, "name": name, "action": "updated"})
-                logger.info("Import: updated existing deal for %s", email)
-            else:
-                # Create new deal
-                deal = await db.create_deal(
-                    name            = name,
-                    email           = email,
-                    company         = company,
-                    domain          = extracted["domain"],
-                    campaign        = lead.get("campaign_name", ""),
-                    reply_body      = lead.get("last_reply_body") or lead.get("reply_text", ""),
-                    job_title       = extracted["job_title"],
-                    job_level       = extracted["job_level"],
-                    department      = extracted["department"],
-                    linkedin        = extracted["linkedin"],
-                    location        = extracted["location"],
-                    headcount       = extracted["headcount"],
-                    industry        = extracted["industry"],
-                    sub_industry    = extracted["sub_industry"],
-                    company_website = extracted["website"],
-                    company_desc    = extracted["description"],
-                    headline        = extracted["headline"],
-                    reply_subject   = lead.get("last_email_subject", ""),
+            for col, val in field_map.items():
+                if val and not deal.get(col):
+                    updates[col] = val
+
+            if not updates:
+                skipped.append(email)
+                continue
+
+            # Apply updates
+            set_clauses = ", ".join([f"{col}=${i+1}" for i, col in enumerate(updates.keys())])
+            values = list(updates.values()) + [db.now_iso(), deal["id"]]
+            pool = await db.get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    f"UPDATE deals SET {set_clauses}, updated_at=${len(updates)+1} WHERE id=${len(updates)+2}",
+                    *values
                 )
-                imported.append({"email": email, "name": name, "action": "created"})
-                logger.info("Import: created deal for %s at %s", name, company)
+
+            enriched.append({"email": email, "name": deal.get("name"), "fields_updated": list(updates.keys())})
+            logger.info("Enriched deal %s — updated: %s", email, list(updates.keys()))
 
         except Exception as exc:
-            logger.error("Import failed for %s: %s", email, exc)
+            logger.error("Enrich failed for %s: %s", email, exc)
             failed.append({"email": email, "error": str(exc)})
 
     return {
-        "success":       True,
-        "total_fetched": len(leads),
-        "imported":      len(imported),
-        "skipped":       len(skipped),
-        "failed":        len(failed),
-        "deals":         imported,
-        "errors":        failed,
+        "success":         True,
+        "total_deals":     len(all_deals),
+        "incomplete":      len(incomplete),
+        "enriched":        len(enriched),
+        "skipped":         len(skipped),
+        "failed":          len(failed),
+        "deals_enriched":  enriched,
+        "errors":          failed,
     }
 
 
