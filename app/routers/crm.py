@@ -674,24 +674,28 @@ async def import_from_instantly(body: dict = {}):
     # ── Step 1: Fetch leads from Instantly ──────────────────────────────────
     leads = []
     try:
-        # Use GET /api/v2/leads with query params — most reliable Instantly v2 endpoint
-        params = {"limit": limit}
+        # POST /api/v2/leads/list with empty search returns all leads
+        request_body: dict = {"search": "", "limit": limit}
         if campaign_id:
-            params["campaign_id"] = campaign_id
+            request_body["campaign_id"] = campaign_id
 
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(
-                f"{INSTANTLY_API_BASE}/leads",
-                params=params,
+            resp = await client.post(
+                f"{INSTANTLY_API_BASE}/leads/list",
+                json=request_body,
                 headers={
                     "Authorization": f"Bearer {settings.instantly_api_key}",
                     "Content-Type": "application/json",
                 },
             )
+            # Log response for debugging
+            logger.info("Instantly /leads/list status: %s", resp.status_code)
+            if resp.status_code >= 400:
+                logger.error("Instantly error body: %s", resp.text[:300])
             resp.raise_for_status()
             data = resp.json()
 
-        # Handle both list response and paginated response
+        # Handle both list and paginated responses
         if isinstance(data, list):
             leads = data
         else:
@@ -700,8 +704,7 @@ async def import_from_instantly(body: dict = {}):
         logger.info("Instantly import: fetched %d leads", len(leads))
 
     except httpx.HTTPStatusError as exc:
-        # Log the actual error response for debugging
-        logger.error("Instantly API %s error: %s", exc.response.status_code, exc.response.text[:300])
+        logger.error("Instantly API %s: %s", exc.response.status_code, exc.response.text[:300])
         raise HTTPException(status_code=502, detail=f"Instantly API error {exc.response.status_code}: {exc.response.text[:200]}")
     except Exception as exc:
         logger.error("Instantly import fetch failed: %s", exc)
