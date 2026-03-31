@@ -85,6 +85,30 @@ async def debug_apollo():
         return {"error": str(e)}
 
 
+@app.get("/debug/pipeline/{email}")
+async def debug_pipeline(email: str):
+    """Show full pipeline status for a specific email — for debugging."""
+    from app.services import database as db
+    deal = await db.get_deal_by_email(email)
+    if not deal:
+        return {"found": False, "email": email}
+    return {
+        "found":      True,
+        "deal_id":    deal["id"],
+        "stage":      deal["stage"],
+        "name":       deal["name"],
+        "company":    deal["company"],
+        "job_title":  deal.get("job_title"),
+        "location":   deal.get("location"),
+        "industry":   deal.get("industry"),
+        "icp_built":  bool(deal.get("icp")),
+        "icp_segments": len(deal["icp"]["segments"]) if deal.get("icp") and deal["icp"].get("segments") else 0,
+        "sentiment":  deal.get("sentiment"),
+        "history":    deal.get("history", []),
+        "last_activity": deal.get("last_activity"),
+    }
+
+
 @app.get("/debug/env")
 def debug_env():
     anthropic = os.environ.get("ANTHROPIC_API_KEY", "")
