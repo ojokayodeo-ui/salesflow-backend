@@ -136,6 +136,27 @@ def extract_prospect_data(lead: dict, payload) -> dict:
     if website and not company_domain:
         company_domain = website.replace("https://","").replace("http://","").replace("www.","").rstrip("/")
 
+    # Also check custom_variables from both lead and payload
+    cv = lead.get("custom_variables") or lead.get("customVariables") or {}
+    if hasattr(payload, "model_extra") and payload.model_extra:
+        cv.update(payload.model_extra)
+    
+    # Try to get missing fields from custom_variables
+    def cv_get(*keys):
+        for k in keys:
+            v = cv.get(k) or cv.get(k.lower()) or cv.get(k.replace("_"," "))
+            if v: return str(v)
+        return ""
+
+    job_title    = job_title    or cv_get("job_title","jobtitle","title","position","role")
+    job_level    = lead.get("jobLevel") or getattr(payload,"job_level",None) or getattr(payload,"jobLevel",None) or cv_get("job_level","seniority","level") or ""
+    company_name = company_name or cv_get("company","company_name","organisation","organization")
+    location     = location     or cv_get("location","city","country","region")
+    industry     = industry     or cv_get("industry","sector","vertical")
+    linkedin     = linkedin     or cv_get("linkedin","linkedin_url","linkedin_profile")
+    headline     = headline     or cv_get("headline","bio","about","summary")
+    department   = lead.get("department") or getattr(payload,"department",None) or cv_get("department","team","function") or ""
+
     return {
         "name":         full_name,
         "first_name":   first_name,
@@ -151,7 +172,7 @@ def extract_prospect_data(lead: dict, payload) -> dict:
         "sub_industry": sub_industry,
         "description":  description,
         "headline":     headline,
-        "job_level":    lead.get("jobLevel") or payload.jobLevel or "",
-        "department":   lead.get("department") or payload.department or "",
-        "reply_subject":payload.reply_subject or "",
+        "job_level":    job_level,
+        "department":   department,
+        "reply_subject":getattr(payload,"reply_subject",None) or "",
     }
