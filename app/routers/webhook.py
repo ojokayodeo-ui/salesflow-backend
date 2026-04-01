@@ -15,6 +15,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 POSITIVE_EVENTS  = {"reply.positive", "lead_interested"}
+_icp_notify_override = None  # None = use env var, True/False = runtime override
 ANY_REPLY_EVENTS = {"reply.positive", "reply", "email_reply",
                     "lead_interested", "reply.negative", "reply.all"}
 
@@ -233,7 +234,11 @@ async def _run_pipeline_inner(payload: InstantlyWebhookPayload):
 
     # Stage 3 — Send notification email (if Outlook is configured)
     # This notifies YOU that a new positive reply came in and ICP is ready
-    if settings.ms_sender_email and settings.ms_tenant_id:
+    # Controlled by SEND_ICP_NOTIFICATION env var (default: true)
+    import os as _os
+    _env_notify = _os.environ.get("SEND_ICP_NOTIFICATION", "true").lower() != "false"
+    _notify_enabled = _icp_notify_override if _icp_notify_override is not None else _env_notify
+    if _notify_enabled and settings.ms_sender_email and settings.ms_tenant_id:
         await db.update_pipeline_run(run_id, stage="notification")
         try:
             from app.models.schemas import ICPData
@@ -299,6 +304,20 @@ async def debug_enrich(email: str):
     dummy_payload = InstantlyWebhookPayload(email=email)
     extracted = extract_prospect_data(lead_data, dummy_payload)
     return {"found": True, "raw_lead": lead_data, "extracted": extracted}
+
+
+
+@router.post("/set-notify")
+async def set_icp_notification(body: dict):
+    """Toggle ICP ready email notifications on/off."""
+    import os
+    enabled = bool(body.get("enabled", True))
+    # Store in a simple file-based flag (persists across restarts within the container)
+    # Railway env vars can't be set at runtime, so we use a module-level variable
+    global _icp_notify_override
+    _icp_notify_override = enabled
+    logger.info("ICP notification %s", "enabled" if enabled else "disabled")
+    return {"success": True, "icp_notifications": enabled}
 
 
 @router.post("/instantly")
