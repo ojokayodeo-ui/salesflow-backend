@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 POSITIVE_EVENTS  = {"reply.positive", "lead_interested"}
 _icp_notify_override = None  # None = use env var, True/False = runtime override
+_last_webhook_payload = {}   # Store last raw payload for debugging
 ANY_REPLY_EVENTS = {"reply.positive", "reply", "email_reply",
                     "lead_interested", "reply.negative", "reply.all"}
 
@@ -307,6 +308,18 @@ async def debug_enrich(email: str):
 
 
 
+@router.get("/last-payload")
+async def get_last_payload():
+    """Return the last webhook payload received — for debugging field mapping."""
+    return {
+        "payload": _last_webhook_payload,
+        "extra_fields": {k: v for k, v in _last_webhook_payload.items() 
+                        if k not in ("event_type","event","timestamp","email","lead_email",
+                                    "first_name","last_name","reply_text","reply_subject",
+                                    "campaign","campaign_id","campaign_name","step")},
+    }
+
+
 @router.post("/set-notify")
 async def set_icp_notification(body: dict):
     """Toggle ICP ready email notifications on/off."""
@@ -332,6 +345,9 @@ async def receive_instantly_webhook(
     event          = payload.get_event()
 
     logger.info("Webhook received: event=%s email=%s", event, prospect_email)
+    # Store raw payload for debug endpoint
+    global _last_webhook_payload
+    _last_webhook_payload = payload.model_dump()
     # Log full raw payload for debugging (first 1000 chars)
     import json as _json
     try:
