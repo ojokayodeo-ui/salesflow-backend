@@ -242,6 +242,34 @@ async def advance_deal_stage(deal_id: str, new_stage: str) -> dict | None:
     return await get_deal(deal_id)
 
 
+async def update_deal_fields(deal_id: str, fields: dict) -> dict | None:
+    """
+    Update one or more profile fields on an existing deal.
+    Accepted keys: name, company, domain, job_title, job_level, department,
+    linkedin, location, headcount, industry, sub_industry, company_website,
+    company_desc, headline, reply_subject, reply_body, campaign.
+    """
+    ALLOWED = {
+        "name", "company", "domain", "job_title", "job_level", "department",
+        "linkedin", "location", "headcount", "industry", "sub_industry",
+        "company_website", "company_desc", "headline", "reply_subject",
+        "reply_body", "campaign",
+    }
+    updates = {k: v for k, v in fields.items() if k in ALLOWED and v is not None}
+    if not updates:
+        return await get_deal(deal_id)
+    ts = now_iso()
+    set_clauses = ", ".join(f"{col}=${i + 1}" for i, col in enumerate(updates.keys()))
+    values = list(updates.values()) + [ts, deal_id]
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE deals SET {set_clauses}, updated_at=${len(updates) + 1} WHERE id=${len(updates) + 2}",
+            *values,
+        )
+    return await get_deal(deal_id)
+
+
 async def set_deal_icp(deal_id: str, icp: dict):
     pool = await get_pool()
     async with pool.acquire() as conn:

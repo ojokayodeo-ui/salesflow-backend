@@ -47,6 +47,21 @@ async def create_deal_manually(body: dict):
     return deal
 
 
+@router.patch("/deals/{deal_id}")
+async def update_deal(deal_id: str, body: dict):
+    """
+    Update one or more profile fields on an existing deal.
+    Accepted fields: name, company, domain, job_title, job_level, department,
+    linkedin, location, headcount, industry, sub_industry, company_website,
+    company_desc, headline, reply_subject, reply_body, campaign.
+    """
+    deal = await db.get_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    updated = await db.update_deal_fields(deal_id, body)
+    return updated
+
+
 @router.patch("/deals/{deal_id}/stage")
 async def update_stage(deal_id: str, stage: str):
     valid = {"new","icp","pending_review","delivered","meeting","won","lost","cold"}
@@ -770,6 +785,97 @@ async def enrich_deals_from_instantly():
         "failed":          len(failed),
         "deals_enriched":  enriched,
         "errors":          failed,
+    }
+
+
+@router.post("/deals/{deal_id}/re-enrich")
+async def re_enrich_deal(deal_id: str):
+    """
+    Re-fetch this deal's prospect profile from Instantly and fill in any missing fields.
+    Useful when a deal was created before INSTANTLY_API_KEY was set, or when
+    Instantly has been updated with richer data since the deal was first created.
+    """
+    import httpx
+    from app.config import settings
+    from app.services.instantly import extract_prospect_data
+    from app.models.schemas import InstantlyWebhookPayload
+
+    deal = await db.get_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+
+    if not settings.instantly_api_key:
+        raise HTTPException(status_code=400, detail="INSTANTLY_API_KEY not configured")
+
+    email = (deal.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Deal has no email address")
+
+    INSTANTLY_API_BASE = "https://api.instantly.ai/api/v2"
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{INSTANTLY_API_BASE}/leads/list",
+                json={"filter": email},
+                headers={
+                    "Authorization": f"Bearer {settings.instantly_api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Instantly API error {exc.response.status_code}: {exc.response.text[:200]}",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Instantly API unreachable: {str(exc)}")
+
+    items = data.get("items", [])
+    lead = next((i for i in items if (i.get("email") or "").lower() == email), None)
+
+    if not lead:
+        return {"enriched": False, "deal_id": deal_id, "reason": "No matching lead found in Instantly"}
+
+    dummy = InstantlyWebhookPayload(email=email)
+    extracted = extract_prospect_data(lead, dummy)
+
+    field_map = {
+        "job_title":       extracted["job_title"],
+        "job_level":       extracted["job_level"],
+        "department":      extracted["department"],
+        "linkedin":        extracted["linkedin"],
+        "location":        extracted["location"],
+        "headcount":       extracted["headcount"],
+        "industry":        extracted["industry"],
+        "sub_industry":    extracted["sub_industry"],
+        "company_website": extracted["website"],
+        "company_desc":    extracted["description"],
+        "headline":        extracted["headline"],
+        "domain":          extracted["domain"],
+    }
+    # Always overwrite (not just fill blanks) so fresh Instantly data wins
+    updates = {k: v for k, v in field_map.items() if v}
+
+    # Update name/company only when they look like email-derived placeholders
+    if extracted["company"] and (not deal.get("company") or len(deal.get("company", "")) < 4):
+        updates["company"] = extracted["company"]
+    if extracted["name"] and deal.get("name", "").replace(" ", "").lower() == email.split("@")[0].replace(".", "").lower():
+        updates["name"] = extracted["name"]
+
+    if not updates:
+        return {"enriched": False, "deal_id": deal_id, "reason": "All fields already populated — nothing to update"}
+
+    updated_deal = await db.update_deal_fields(deal_id, updates)
+    logger.info("Re-enriched deal %s from Instantly — updated: %s", deal_id, list(updates.keys()))
+
+    return {
+        "enriched":       True,
+        "deal_id":        deal_id,
+        "fields_updated": list(updates.keys()),
+        "deal":           updated_deal,
     }
 
 
