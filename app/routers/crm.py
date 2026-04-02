@@ -667,9 +667,8 @@ async def enrich_deals_from_instantly():
     fetch the full lead profile from Instantly by email and fill in the gaps.
     Does NOT create new deals — only enriches existing ones.
     """
-    import httpx
     from app.config import settings
-    from app.services.instantly import extract_prospect_data
+    from app.services.instantly import get_lead_by_email, extract_prospect_data
     from app.models.schemas import InstantlyWebhookPayload
 
     if not settings.instantly_api_key:
@@ -692,33 +691,14 @@ async def enrich_deals_from_instantly():
     skipped  = []
     failed   = []
 
-    INSTANTLY_API_BASE = "https://api.instantly.ai/api/v2"
-
     for deal in incomplete:
         email = (deal.get("email") or "").strip().lower()
         if not email:
             continue
 
         try:
-            # Fetch lead from Instantly by email
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    f"{INSTANTLY_API_BASE}/leads/list",
-                    json={"filter": email},
-                    headers={
-                        "Authorization": f"Bearer {settings.instantly_api_key}",
-                        "Content-Type": "application/json",
-                    },
-                )
-                resp.raise_for_status()
-                data = resp.json()
-
-            items = data.get("items", [])
-            # Find exact email match
-            lead = next(
-                (i for i in items if (i.get("email") or "").lower() == email),
-                None
-            )
+            # Use shared get_lead_by_email which tries all known Instantly API formats
+            lead = await get_lead_by_email(email)
 
             if not lead:
                 logger.info("No Instantly data found for %s — skipping", email)
@@ -795,9 +775,8 @@ async def re_enrich_deal(deal_id: str):
     Useful when a deal was created before INSTANTLY_API_KEY was set, or when
     Instantly has been updated with richer data since the deal was first created.
     """
-    import httpx
     from app.config import settings
-    from app.services.instantly import extract_prospect_data
+    from app.services.instantly import get_lead_by_email, extract_prospect_data
     from app.models.schemas import InstantlyWebhookPayload
 
     deal = await db.get_deal(deal_id)
@@ -811,30 +790,7 @@ async def re_enrich_deal(deal_id: str):
     if not email:
         raise HTTPException(status_code=400, detail="Deal has no email address")
 
-    INSTANTLY_API_BASE = "https://api.instantly.ai/api/v2"
-
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"{INSTANTLY_API_BASE}/leads/list",
-                json={"filter": email},
-                headers={
-                    "Authorization": f"Bearer {settings.instantly_api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Instantly API error {exc.response.status_code}: {exc.response.text[:200]}",
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Instantly API unreachable: {str(exc)}")
-
-    items = data.get("items", [])
-    lead = next((i for i in items if (i.get("email") or "").lower() == email), None)
+    lead = await get_lead_by_email(email)
 
     if not lead:
         return {"enriched": False, "deal_id": deal_id, "reason": "No matching lead found in Instantly"}
