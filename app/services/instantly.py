@@ -18,77 +18,88 @@ INSTANTLY_API_BASE = "https://api.instantly.ai/api/v2"
 async def get_lead_by_email(email: str) -> dict:
     """
     Fetch full lead data from Instantly API by email address.
-    Returns a dict with all available prospect fields.
-    Falls back to empty dict if API call fails.
-
-    Instantly v2 /leads/list accepts `email` as the search key.
-    We raise the limit so the strict email-match loop has room to find the lead
-    even if the API returns results in an unexpected order.
+    Tries multiple known Instantly v2 API formats to maximise hit rate.
+    Returns a dict with all available prospect fields, or {} if not found.
     """
     if not settings.instantly_api_key:
         logger.warning("INSTANTLY_API_KEY not set — skipping lead enrichment")
         return {}
 
-    # Try multiple request formats; Instantly v2 uses `email` as the filter key.
-    # We attempt the two most likely formats and fall back gracefully.
-    request_bodies = [
-        {"email": email, "limit": 25},           # v2 preferred format
-        {"search": email, "limit": 25},           # alternative v2 format
-        {"filter": email, "limit": 25},           # legacy format (kept as last resort)
+    auth_headers = {
+        "Authorization": f"Bearer {settings.instantly_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    def _find_in_items(items: list) -> dict | None:
+        """Return the first item whose email matches exactly."""
+        for item in items:
+            if (item.get("email") or "").lower().strip() == email.lower().strip():
+                return item
+        return None
+
+    def _parse_items(data) -> list:
+        """Handle multiple Instantly response envelope formats."""
+        if isinstance(data, list):
+            return data
+        for key in ("items", "data", "leads", "results", "contacts"):
+            if isinstance(data.get(key), list):
+                return data[key]
+        return []
+
+    # ── Attempt 1: GET /leads?email=xxx ─────────────────────────────────────
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{INSTANTLY_API_BASE}/leads",
+                params={"email": email, "limit": 25},
+                headers=auth_headers,
+            )
+            resp.raise_for_status()
+            items = _parse_items(resp.json())
+            lead = _find_in_items(items)
+            if lead:
+                logger.info("Instantly lead found (GET /leads?email): %s at %s",
+                            lead.get("first_name",""), lead.get("company_name",""))
+                return lead
+            if items:
+                logger.info("GET /leads?email returned %d items but no exact match for %s", len(items), email)
+    except httpx.HTTPStatusError as exc:
+        logger.info("GET /leads?email → %s for %s", exc.response.status_code, email)
+    except Exception as exc:
+        logger.info("GET /leads?email failed for %s: %s", email, exc)
+
+    # ── Attempts 2–4: POST /leads/list with various filter formats ───────────
+    post_bodies = [
+        {"email": email, "limit": 25},
+        {"search": email, "limit": 25},
+        {"filter": email, "limit": 25},
     ]
 
-    for body in request_bodies:
+    for body in post_bodies:
+        fmt = list(body.keys())[0]
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.post(
                     f"{INSTANTLY_API_BASE}/leads/list",
                     json=body,
-                    headers={
-                        "Authorization": f"Bearer {settings.instantly_api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    headers=auth_headers,
                 )
                 resp.raise_for_status()
-                data = resp.json()
-
-            items = data.get("items", [])
-            if not items:
-                continue  # try next format
-
-            # Strict email match
-            lead = None
-            for item in items:
-                item_email = (item.get("email") or "").lower().strip()
-                if item_email == email.lower().strip():
-                    lead = item
-                    break
-
-            if lead:
-                logger.info(
-                    "Enriched lead from Instantly (format=%s): %s at %s",
-                    list(body.keys())[0],
-                    lead.get("first_name", "") or lead.get("firstName", ""),
-                    lead.get("company_name", "") or lead.get("companyName", ""),
-                )
-                return lead
-
-            logger.info(
-                "Instantly returned %d lead(s) for format=%s but none matched %s exactly",
-                len(items), list(body.keys())[0], email,
-            )
-
+                items = _parse_items(resp.json())
+                lead = _find_in_items(items)
+                if lead:
+                    logger.info("Instantly lead found (POST /leads/list fmt=%s): %s at %s",
+                                fmt, lead.get("first_name",""), lead.get("company_name",""))
+                    return lead
+                if items:
+                    logger.info("POST /leads/list fmt=%s returned %d items but no exact match for %s",
+                                fmt, len(items), email)
         except httpx.HTTPStatusError as exc:
-            logger.warning(
-                "Instantly API error %s (format=%s) for %s: %s",
-                exc.response.status_code, list(body.keys())[0], email, exc.response.text[:200],
-            )
+            logger.info("POST /leads/list fmt=%s → %s for %s", fmt, exc.response.status_code, email)
         except Exception as exc:
-            logger.warning(
-                "Instantly lead fetch failed (format=%s) for %s: %s",
-                list(body.keys())[0], email, exc,
-            )
+            logger.info("POST /leads/list fmt=%s failed for %s: %s", fmt, email, exc)
 
-    logger.info("No Instantly lead found for %s after trying all search formats", email)
+    logger.warning("No Instantly lead found for %s after all attempts", email)
     return {}
 
 

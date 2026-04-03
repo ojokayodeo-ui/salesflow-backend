@@ -854,6 +854,63 @@ async def re_enrich_deal(deal_id: str):
     }
 
 
+# ── Instantly Debug ──────────────────────────────────────────────────────────
+
+@router.get("/debug-instantly/{email}")
+async def debug_instantly_raw(email: str):
+    """
+    Show the RAW Instantly API response for a lead email.
+    Use this to diagnose enrichment failures — it tries all known API formats
+    and returns exactly what Instantly sends back for each attempt.
+    """
+    import httpx
+    from app.config import settings
+
+    if not settings.instantly_api_key:
+        return {"error": "INSTANTLY_API_KEY not set"}
+
+    INSTANTLY_API_BASE = "https://api.instantly.ai/api/v2"
+    auth_headers = {
+        "Authorization": f"Bearer {settings.instantly_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    results = {}
+
+    # GET /leads?email=xxx
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{INSTANTLY_API_BASE}/leads",
+                params={"email": email, "limit": 10},
+                headers=auth_headers,
+            )
+        results["GET_leads_email_param"] = {
+            "status": resp.status_code,
+            "body": resp.json(),
+        }
+    except Exception as exc:
+        results["GET_leads_email_param"] = {"error": str(exc)}
+
+    # POST /leads/list with each filter format
+    for fmt_key in ("email", "search", "filter"):
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{INSTANTLY_API_BASE}/leads/list",
+                    json={fmt_key: email, "limit": 10},
+                    headers=auth_headers,
+                )
+            results[f"POST_leads_list_{fmt_key}"] = {
+                "status": resp.status_code,
+                "body": resp.json(),
+            }
+        except Exception as exc:
+            results[f"POST_leads_list_{fmt_key}"] = {"error": str(exc)}
+
+    return {"email": email, "attempts": results}
+
+
 # ── Notes Endpoints ──────────────────────────────────────────────────────────
 
 @router.get("/deals/{deal_id}/notes")
