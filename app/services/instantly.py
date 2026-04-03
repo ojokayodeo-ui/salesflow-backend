@@ -108,57 +108,76 @@ def extract_prospect_data(lead: dict, payload) -> dict:
     Merge Instantly API lead data with webhook payload.
     Returns a clean dict of all prospect fields.
     Priority: Instantly API data > webhook payload fields.
-    Handles both snake_case (v2) and camelCase (v1) field names from both sources.
+
+    Instantly v2 stores profile fields in a nested 'personalization' object.
+    We flatten it into the lead dict first so all lookups work the same way.
     """
+    # ── Flatten Instantly v2 'personalization' object ────────────────────────
+    # Instantly v2 /leads/list returns profile data nested under 'personalization'
+    # e.g. {"email": "gary@...", "personalization": {"first_name": "Gary", "job_title": "MD", ...}}
+    # Merge it into a flat dict so all field lookups below work identically.
+    flat = dict(lead)
+    personalization = lead.get("personalization") or {}
+    if isinstance(personalization, dict):
+        for k, v in personalization.items():
+            if v and not flat.get(k):   # personalization fills gaps only; top-level wins
+                flat[k] = v
+    # Also check 'payload' nested object inside personalization (some Instantly versions)
+    inner_payload = personalization.get("payload") or {}
+    if isinstance(inner_payload, dict):
+        for k, v in inner_payload.items():
+            if v and not flat.get(k):
+                flat[k] = v
+
     def p(attr):
-        """Safely get attribute from payload, trying snake_case and camelCase variants."""
+        """Safely get attribute from webhook payload."""
         return getattr(payload, attr, None) or ""
 
     # Names
-    first_name   = lead.get("first_name") or lead.get("firstName") or p("first_name") or p("firstName")
-    last_name    = lead.get("last_name")  or lead.get("lastName")  or p("last_name")  or p("lastName")
+    first_name   = flat.get("first_name") or flat.get("firstName") or p("first_name") or p("firstName")
+    last_name    = flat.get("last_name")  or flat.get("lastName")  or p("last_name")  or p("lastName")
 
     # Company
-    company_name  = lead.get("company_name")   or lead.get("companyName")   or p("company_name")   or p("companyName")
-    company_domain= lead.get("company_domain") or lead.get("companyDomain") or p("company_domain") or p("companyDomain")
-    website       = lead.get("website") or lead.get("company_website") or lead.get("companyWebsite") or p("company_website") or p("companyWebsite") or p("website")
+    company_name  = flat.get("company_name")   or flat.get("companyName")   or p("company_name")   or p("companyName")
+    company_domain= flat.get("company_domain") or flat.get("companyDomain") or p("company_domain") or p("companyDomain")
+    website       = flat.get("website") or flat.get("company_website") or flat.get("companyWebsite") or p("company_website") or p("companyWebsite") or p("website")
 
     # Job
-    job_title = lead.get("job_title") or lead.get("personTitle") or lead.get("jobTitle") or p("job_title") or p("jobTitle")
-    job_level = lead.get("job_level") or lead.get("jobLevel") or p("job_level") or p("jobLevel")
-    department= lead.get("department") or p("department")
+    job_title = flat.get("job_title") or flat.get("personTitle") or flat.get("jobTitle") or p("job_title") or p("jobTitle")
+    job_level = flat.get("job_level") or flat.get("jobLevel") or flat.get("seniority") or p("job_level") or p("jobLevel")
+    department= flat.get("department") or p("department")
 
     # Social
-    linkedin  = lead.get("linkedin_url") or lead.get("linkedInUrl") or lead.get("linkedIn") or p("linkedin_url") or p("linkedIn")
+    linkedin  = flat.get("linkedin_url") or flat.get("linkedInUrl") or flat.get("linkedIn") or flat.get("linkedin") or p("linkedin_url") or p("linkedIn")
 
     # Location — build from parts if flat field missing
-    location  = lead.get("location") or p("location") or ""
+    location  = flat.get("location") or p("location") or ""
     if not location:
-        city    = lead.get("city")    or p("city")    or ""
-        state   = lead.get("state")   or p("state")   or ""
-        country = lead.get("country") or p("country") or ""
+        city    = flat.get("city")    or p("city")    or ""
+        state   = flat.get("state")   or p("state")   or ""
+        country = flat.get("country") or p("country") or ""
         parts   = [x for x in [city, state, country] if x]
         location = ", ".join(parts)
-    elif lead.get("country") and lead["country"] not in location:
-        location = f"{location}, {lead['country']}"
+    elif flat.get("country") and flat["country"] not in location:
+        location = f"{location}, {flat['country']}"
 
     # Company size
     headcount = str(
-        lead.get("employee_count") or lead.get("employeeCount") or
-        lead.get("companyHeadCount") or p("employee_count") or p("companyHeadCount") or ""
+        flat.get("employee_count") or flat.get("employeeCount") or flat.get("companyHeadCount") or
+        flat.get("number_of_employees") or p("employee_count") or p("companyHeadCount") or ""
     )
 
     # Industry
-    industry     = lead.get("industry")     or p("industry")     or ""
-    sub_industry = lead.get("sub_industry") or lead.get("subIndustry") or p("sub_industry") or p("subIndustry") or ""
-    description  = lead.get("company_description") or lead.get("companyDescription") or p("company_description") or p("companyDescription") or ""
-    headline     = lead.get("headline") or p("headline") or ""
+    industry     = flat.get("industry")     or p("industry")     or ""
+    sub_industry = flat.get("sub_industry") or flat.get("subIndustry") or p("sub_industry") or p("subIndustry") or ""
+    description  = flat.get("company_description") or flat.get("companyDescription") or flat.get("summary") or p("company_description") or p("companyDescription") or ""
+    headline     = flat.get("headline") or flat.get("bio") or p("headline") or ""
 
     # Build full name
     full_name = f"{first_name} {last_name}".strip()
     if not full_name:
-        email = payload.get_prospect_email()
-        full_name = email.split("@")[0].replace(".", " ").title() if email else "Unknown"
+        prospect_email = payload.get_prospect_email()
+        full_name = prospect_email.split("@")[0].replace(".", " ").title() if prospect_email else "Unknown"
 
     # Clean website
     if website and not website.startswith("http"):
@@ -168,26 +187,25 @@ def extract_prospect_data(lead: dict, payload) -> dict:
     if website and not company_domain:
         company_domain = website.replace("https://","").replace("http://","").replace("www.","").rstrip("/")
 
-    # Also check custom_variables from both lead and payload
-    cv = lead.get("custom_variables") or lead.get("customVariables") or {}
+    # Also check custom_variables from both lead/flat and payload
+    cv = flat.get("custom_variables") or flat.get("customVariables") or {}
     if hasattr(payload, "model_extra") and payload.model_extra:
         cv.update(payload.model_extra)
-    
-    # Try to get missing fields from custom_variables
+
     def cv_get(*keys):
         for k in keys:
-            v = cv.get(k) or cv.get(k.lower()) or cv.get(k.replace("_"," "))
+            v = cv.get(k) or cv.get(k.lower()) or cv.get(k.replace("_", " "))
             if v: return str(v)
         return ""
 
     job_title    = job_title    or cv_get("job_title","jobtitle","title","position","role")
-    job_level    = lead.get("jobLevel") or getattr(payload,"job_level",None) or getattr(payload,"jobLevel",None) or cv_get("job_level","seniority","level") or ""
+    job_level    = job_level    or cv_get("job_level","seniority","level") or ""
     company_name = company_name or cv_get("company","company_name","organisation","organization")
     location     = location     or cv_get("location","city","country","region")
     industry     = industry     or cv_get("industry","sector","vertical")
     linkedin     = linkedin     or cv_get("linkedin","linkedin_url","linkedin_profile")
     headline     = headline     or cv_get("headline","bio","about","summary")
-    department   = lead.get("department") or getattr(payload,"department",None) or cv_get("department","team","function") or ""
+    department   = department   or getattr(payload,"department",None) or cv_get("department","team","function") or ""
 
     return {
         "name":         full_name,
