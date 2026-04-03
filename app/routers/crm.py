@@ -725,10 +725,20 @@ async def enrich_deals_from_instantly():
                 "headline":        extracted["headline"],
                 "domain":          extracted["domain"],
             }
-            # Also update name/company if they look like email-derived placeholders
-            if extracted["company"] and (not deal.get("company") or len(deal.get("company","")) < 4):
+
+            # Detect if company name was auto-derived from email domain (e.g. "Gkrecruitment" from gkrecruitment.com)
+            email_domain   = email.split("@")[1] if "@" in email else ""
+            derived_guess  = email_domain.split(".")[0].replace("-", " ").replace("_", " ").title() if email_domain else ""
+            company_is_derived = (
+                not deal.get("company")
+                or len((deal.get("company") or "").strip()) < 4
+                or (derived_guess and (deal.get("company") or "").lower().strip() == derived_guess.lower().strip())
+            )
+            if extracted["company"] and company_is_derived:
                 updates["company"] = extracted["company"]
-            if extracted["name"] and deal.get("name","").replace(" ","").lower() == email.split("@")[0].replace(".","").lower():
+
+            name_is_derived = (deal.get("name") or "").replace(" ", "").lower() == email.split("@")[0].replace(".", "").lower()
+            if extracted["name"] and name_is_derived:
                 updates["name"] = extracted["name"]
 
             for col, val in field_map.items():
@@ -812,17 +822,26 @@ async def re_enrich_deal(deal_id: str):
         "headline":        extracted["headline"],
         "domain":          extracted["domain"],
     }
-    # Always overwrite (not just fill blanks) so fresh Instantly data wins
+    # Always overwrite with fresh Instantly data (re-enrich is an explicit manual action)
     updates = {k: v for k, v in field_map.items() if v}
 
-    # Update name/company only when they look like email-derived placeholders
-    if extracted["company"] and (not deal.get("company") or len(deal.get("company", "")) < 4):
+    # Update company if it looks auto-derived from the email domain (e.g. "Gkrecruitment" from gkrecruitment.com)
+    email_domain  = email.split("@")[1] if "@" in email else ""
+    derived_guess = email_domain.split(".")[0].replace("-", " ").replace("_", " ").title() if email_domain else ""
+    company_is_derived = (
+        not deal.get("company")
+        or len((deal.get("company") or "").strip()) < 4
+        or (derived_guess and (deal.get("company") or "").lower().strip() == derived_guess.lower().strip())
+    )
+    if extracted["company"] and company_is_derived:
         updates["company"] = extracted["company"]
-    if extracted["name"] and deal.get("name", "").replace(" ", "").lower() == email.split("@")[0].replace(".", "").lower():
+
+    name_is_derived = (deal.get("name") or "").replace(" ", "").lower() == email.split("@")[0].replace(".", "").lower()
+    if extracted["name"] and name_is_derived:
         updates["name"] = extracted["name"]
 
     if not updates:
-        return {"enriched": False, "deal_id": deal_id, "reason": "All fields already populated — nothing to update"}
+        return {"enriched": False, "deal_id": deal_id, "reason": "No new data found in Instantly to update"}
 
     updated_deal = await db.update_deal_fields(deal_id, updates)
     logger.info("Re-enriched deal %s from Instantly — updated: %s", deal_id, list(updates.keys()))
