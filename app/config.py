@@ -10,6 +10,7 @@ class Settings:
         self.ms_sender_email          = os.environ.get("MS_SENDER_EMAIL", "")
         self.instantly_webhook_secret = os.environ.get("INSTANTLY_WEBHOOK_SECRET", "")
         self.instantly_api_key        = os.environ.get("INSTANTLY_API_KEY", "")
+        self.apify_api_token          = os.environ.get("APIFY_API_TOKEN", "")
         self.review_mode              = os.environ.get("REVIEW_MODE", "false").lower() == "true"
         self.auto_send_email          = os.environ.get("AUTO_SEND_EMAIL", "true").lower() == "true"
         self.default_from_name        = os.environ.get("DEFAULT_FROM_NAME", "Kayode · PALM")

@@ -42,14 +42,60 @@ async def scrape_website(url: str) -> str:
 async def generate_icp_segments(prospect: ProspectData, reply_body: str = "") -> list[dict]:
     """
     Generate 5 distinct ICP segments for the prospect's business.
-    Returns a list of 5 segment dicts, each ready to display in the frontend.
-    Falls back to sensible defaults if the API call fails.
+
+    Data sources used (in order of priority):
+      1. Prospect's reply text          — primary signal
+      2. Prospect profile (Instantly)   — job title, industry, location, etc.
+      3. Prospect's website             — what they do / who they serve
+      4. Apify Google Search            — external market intelligence (if APIFY_API_TOKEN set)
+
+    Falls back to sensible defaults if the Claude API call fails.
     """
+    from app.services.apify import enrich_icp_context
+
+    # ── 1. Scrape website ────────────────────────────────────────────────────
     website_content = await scrape_website(prospect.website or "")
     if website_content:
         logger.info("Website scraped for %s (%d chars)", prospect.company, len(website_content))
 
-    # Extract key signals from the reply
+    # ── 2. Apify external enrichment ─────────────────────────────────────────
+    # Extract keywords from the reply to focus the searches
+    reply_keywords: list[str] = []
+    if reply_body and reply_body.strip():
+        import re as _re
+        words = _re.findall(r'\b[A-Za-z]{4,}\b', reply_body)
+        stop  = {"that","this","with","from","have","they","their","your","been","will",
+                 "would","could","just","also","into","about","more","some","when","than"}
+        reply_keywords = [w.lower() for w in words if w.lower() not in stop][:10]
+
+    apify_intel = await enrich_icp_context(
+        company_name   = prospect.company or "",
+        domain         = prospect.domain or prospect.website or "",
+        industry       = prospect.industry or "",
+        reply_keywords = reply_keywords,
+        location       = prospect.location or "United Kingdom",
+    )
+
+    # ── 3. Build Apify context block ─────────────────────────────────────────
+    apify_block = ""
+    if apify_intel:
+        parts = []
+        if apify_intel.get("client_signals"):
+            parts.append("WHO THEY SERVE (from Google search):\n" +
+                         "\n".join(apify_intel["client_signals"]))
+        if apify_intel.get("pain_points"):
+            parts.append("SECTOR PAIN POINTS (from Google search):\n" +
+                         "\n".join(apify_intel["pain_points"]))
+        if apify_intel.get("market_context"):
+            parts.append("MARKET CONTEXT & BUYING SIGNALS (from Google search):\n" +
+                         "\n".join(apify_intel["market_context"]))
+        if parts:
+            apify_block = "\n\n=== EXTERNAL MARKET INTELLIGENCE (Apify) ===\n" + \
+                          "\n\n".join(parts) + \
+                          "\n=== END EXTERNAL INTELLIGENCE ===\n"
+            logger.info("Apify context injected for %s (%d chars)", prospect.company, len(apify_block))
+
+    # ── 4. Build reply signal block ──────────────────────────────────────────
     reply_signals = ""
     if reply_body and reply_body.strip() and reply_body != "No reply text captured":
         reply_signals = f"""
@@ -69,7 +115,7 @@ REPLY TEXT:
 
     prospect_context = f"""
 {reply_signals}
-PROSPECT DETAILS (from Instantly.ai — use to support the reply signals above):
+PROSPECT DETAILS (from Instantly.ai):
 - Name: {prospect.name}
 - Job Title: {prospect.job_title or 'Unknown'}
 - Company: {prospect.company}
@@ -81,8 +127,9 @@ PROSPECT DETAILS (from Instantly.ai — use to support the reply signals above):
 - Description: {prospect.description[:500] if prospect.description else 'Not provided'}
 - Headline: {prospect.headline or 'Not provided'}
 
-WEBSITE CONTENT (supporting context — use to fill gaps the reply doesn't cover):
+WEBSITE CONTENT:
 {website_content if website_content else 'Could not scrape — rely on the reply and description above.'}
+{apify_block}
 """.strip()
 
     prompt = f"""You are a world-class B2B market segmentation expert specialising in outbound sales strategy.
@@ -90,11 +137,12 @@ WEBSITE CONTENT (supporting context — use to fill gaps the reply doesn't cover
 Your task: Analyse the prospect below and identify the 5 best distinct audience segments they should be targeting with their outbound prospecting.
 
 IMPORTANT INSTRUCTIONS:
-1. START with the prospect's reply — this is the PRIMARY signal. If they mention specific industries, client types, or markets in their reply, those MUST be reflected in your segments.
-2. Use the website content and company description as SUPPORTING context to fill gaps.
-3. If the reply mentions a specific market (e.g. "we work with NHS trusts"), Segment 1 should directly reflect that.
+1. START with the prospect's reply — this is the PRIMARY signal.
+2. Use the EXTERNAL MARKET INTELLIGENCE (Apify) section if present — it contains real Google search data about who the prospect serves and what their sector cares about right now. Use this to validate and sharpen your segments.
+3. Use website content and company description to fill remaining gaps.
 4. Make each segment MEANINGFULLY DIFFERENT — different industries, job titles, company sizes, or pain points.
 5. Be specific — "NHS Procurement Directors at acute trusts" beats "healthcare companies".
+6. Ground pain points and buying signals in the real market data from the Apify section when available.
 
 {prospect_context}
 

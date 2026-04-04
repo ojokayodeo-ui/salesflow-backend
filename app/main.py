@@ -117,6 +117,7 @@ def debug_env():
     ms_client  = os.environ.get("MS_CLIENT_ID", "")
     ms_sender  = os.environ.get("MS_SENDER_EMAIL", "")
     instantly  = os.environ.get("INSTANTLY_API_KEY", "")
+    apify      = os.environ.get("APIFY_API_TOKEN", "")
     return {
         "anthropic_set":    bool(anthropic),
         "anthropic_prefix": anthropic[:15] if anthropic else "NOT SET",
@@ -124,6 +125,8 @@ def debug_env():
         "apollo_prefix":    apollo[:10] if apollo else "NOT SET",
         "instantly_set":    bool(instantly),
         "instantly_prefix": instantly[:10] if instantly else "NOT SET",
+        "apify_set":        bool(apify),
+        "apify_prefix":     apify[:10] if apify else "NOT SET",
         "ms_tenant_set":    bool(ms_tenant),
         "ms_client_set":    bool(ms_client),
         "ms_sender":        ms_sender or "NOT SET",
