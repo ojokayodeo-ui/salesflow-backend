@@ -3,8 +3,9 @@ import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import email, webhook, pipeline, crm, calendly, analytics
+from app.routers import email, webhook, pipeline, crm, calendly, analytics, prompts
 from app.services.database import init_db, ensure_extra_tables
+from app.services.prompt_db import ensure_prompt_tables
 from app.services.scheduler import run_scheduler
 
 
@@ -12,6 +13,7 @@ from app.services.scheduler import run_scheduler
 async def lifespan(app: FastAPI):
     await init_db()
     await ensure_extra_tables()
+    await ensure_prompt_tables()
     # Start the email scheduler as a background task
     scheduler_task = asyncio.create_task(run_scheduler())
     yield
@@ -24,7 +26,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PALM Backend",
-    version="3.3.0",
+    version="3.4.0",
     lifespan=lifespan,
 )
 
@@ -42,11 +44,12 @@ app.include_router(pipeline.router, prefix="/api/pipeline", tags=["Pipeline"])
 app.include_router(crm.router,      prefix="/api/crm",      tags=["CRM"])
 app.include_router(calendly.router,  prefix="/api/calendly",  tags=["Calendly"])
 app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"])
+app.include_router(prompts.router,  prefix="/api/prompts",   tags=["Prompts"])
 
 
 @app.get("/")
 def root():
-    return {"status": "PALM backend running", "version": "3.3.0"}
+    return {"status": "PALM backend running", "version": "3.4.0"}
 
 
 @app.get("/debug/apollo")
