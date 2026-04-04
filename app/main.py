@@ -132,4 +132,5 @@ def debug_env():
         "ms_sender":        ms_sender or "NOT SET",
         "review_mode":      os.environ.get("REVIEW_MODE", "not set"),
         "from_name":        os.environ.get("DEFAULT_FROM_NAME", "not set"),
+        "app_url":          os.environ.get("APP_URL", "NOT SET"),
     }

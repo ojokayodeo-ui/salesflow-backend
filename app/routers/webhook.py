@@ -274,7 +274,7 @@ Their reply: "{reply[:200]}{'...' if len(reply)>200 else ''}"
 Segments generated:
 {seg_summary}
 
-View deal: https://your-netlify-app.netlify.app (CRM tab)
+View deal: {_os.environ.get("APP_URL", "https://your-palm-app.netlify.app")} (CRM tab)
 """
 
             await send_email_via_outlook(

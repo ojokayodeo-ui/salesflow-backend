@@ -142,10 +142,26 @@ async def init_db():
         await conn.execute(CREATE_SCHEDULED_EMAILS)
         # Add columns that may be missing in older schemas
         new_cols = {
+            # Profile fields added after initial deploy
+            "domain":          "TEXT",
+            "job_title":       "TEXT",
+            "job_level":       "TEXT",
+            "department":      "TEXT",
+            "linkedin":        "TEXT",
+            "location":        "TEXT",
+            "headcount":       "TEXT",
+            "industry":        "TEXT",
+            "sub_industry":    "TEXT",
+            "company_website": "TEXT",
+            "company_desc":    "TEXT",
+            "headline":        "TEXT",
+            "reply_subject":   "TEXT",
+            # Sentiment & activity
             "sentiment":       "TEXT DEFAULT 'warm'",
             "sentiment_reason":"TEXT",
             "sentiment_emoji": "TEXT DEFAULT '☀️'",
             "last_activity":   "TEXT",
+            # Sequence management
             "seq_active":      "INTEGER NOT NULL DEFAULT 0",
             "seq_id":          "TEXT",
             "seq_step":        "INTEGER DEFAULT 1",
