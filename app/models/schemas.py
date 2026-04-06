@@ -178,6 +178,35 @@ class ICPData(BaseModel):
     segmentation:        Optional[List[str]] = None
 
 
+class OutlookAccountCreate(BaseModel):
+    tenant_id:     str
+    client_id:     str
+    client_secret: str
+    sender_email:  str
+    display_name:  str = ""
+    is_default:    bool = False
+
+
+class OutlookAccountUpdate(BaseModel):
+    tenant_id:     Optional[str] = None
+    client_id:     Optional[str] = None
+    client_secret: Optional[str] = None
+    sender_email:  Optional[str] = None
+    display_name:  Optional[str] = None
+    is_default:    Optional[bool] = None
+
+
+class OutlookAccountResponse(BaseModel):
+    id:           str
+    tenant_id:    str
+    client_id:    str
+    sender_email: str
+    display_name: str
+    is_default:   bool
+    created_at:   str
+    updated_at:   str
+
+
 class PipelineRunRequest(BaseModel):
     prospect:  ProspectData
     auto_send: bool = False

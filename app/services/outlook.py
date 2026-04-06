@@ -23,16 +23,23 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 TOKEN_URL = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
 
 
-async def get_access_token() -> str:
+async def get_access_token(credentials: dict | None = None) -> str:
     """
     Obtain a short-lived access token from Azure AD using
     the client credentials (app-only) flow.
+
+    credentials: optional dict with keys tenant_id, client_id, client_secret.
+                 Falls back to environment-variable settings when not provided.
     """
-    url = TOKEN_URL.format(tenant_id=settings.ms_tenant_id)
+    tenant_id     = (credentials or {}).get("tenant_id")     or settings.ms_tenant_id
+    client_id     = (credentials or {}).get("client_id")     or settings.ms_client_id
+    client_secret = (credentials or {}).get("client_secret") or settings.ms_client_secret
+
+    url = TOKEN_URL.format(tenant_id=tenant_id)
     payload = {
         "grant_type":    "client_credentials",
-        "client_id":     settings.ms_client_id,
-        "client_secret": settings.ms_client_secret,
+        "client_id":     client_id,
+        "client_secret": client_secret,
         "scope":         "https://graph.microsoft.com/.default",
     }
     async with httpx.AsyncClient(timeout=15) as client:
@@ -42,13 +49,14 @@ async def get_access_token() -> str:
 
 
 def _build_message(
-    to_email:    str,
-    to_name:     str,
-    from_name:   str,
-    subject:     str,
-    body:        str,
-    csv_data:    str | None = None,
+    to_email:     str,
+    to_name:      str,
+    from_name:    str,
+    subject:      str,
+    body:         str,
+    csv_data:     str | None = None,
     csv_filename: str = "leads_100.csv",
+    sender_email: str | None = None,
 ) -> dict:
     """
     Construct the Graph API sendMail message object.
@@ -64,7 +72,7 @@ def _build_message(
         "from": {
             "emailAddress": {
                 "name":    from_name,
-                "address": settings.ms_sender_email,
+                "address": sender_email or settings.ms_sender_email,
             }
         },
         "toRecipients": [
@@ -94,21 +102,28 @@ def _build_message(
 
 
 async def send_email_via_outlook(
-    to_email:    str,
-    to_name:     str,
-    from_name:   str,
-    subject:     str,
-    body:        str,
-    csv_data:    str | None = None,
+    to_email:     str,
+    to_name:      str,
+    from_name:    str,
+    subject:      str,
+    body:         str,
+    csv_data:     str | None = None,
     csv_filename: str = "leads_100.csv",
+    credentials:  dict | None = None,
 ) -> dict:
     """
     Send an email through Microsoft Graph on behalf of the configured
     sender mailbox. Returns {"success": True, "message_id": "..."} or
     {"success": False, "error": "..."}.
+
+    credentials: optional dict with keys tenant_id, client_id, client_secret,
+                 sender_email (and optionally display_name). When provided,
+                 these override the environment-variable defaults.
     """
     try:
-        token = await get_access_token()
+        token = await get_access_token(credentials)
+
+        sender_email = (credentials or {}).get("sender_email") or settings.ms_sender_email
 
         message = _build_message(
             to_email=to_email,
@@ -118,11 +133,12 @@ async def send_email_via_outlook(
             body=body,
             csv_data=csv_data,
             csv_filename=csv_filename,
+            sender_email=sender_email,
         )
 
         # POST /users/{sender}/sendMail
         # The sender must have a mailbox in the tenant.
-        url = f"{GRAPH_BASE}/users/{settings.ms_sender_email}/sendMail"
+        url = f"{GRAPH_BASE}/users/{sender_email}/sendMail"
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type":  "application/json",

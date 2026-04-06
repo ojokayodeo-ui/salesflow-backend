@@ -583,6 +583,19 @@ async def get_scheduled_emails_for_deal(deal_id: str) -> list[dict]:
 
 # ── Extra Tables ────────────────────────────────────────────────────────────
 
+CREATE_OUTLOOK_ACCOUNTS = """
+CREATE TABLE IF NOT EXISTS outlook_accounts (
+    id            TEXT PRIMARY KEY,
+    tenant_id     TEXT NOT NULL,
+    client_id     TEXT NOT NULL,
+    client_secret TEXT NOT NULL,
+    sender_email  TEXT NOT NULL,
+    display_name  TEXT NOT NULL DEFAULT '',
+    is_default    INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+)"""
+
 CREATE_NOTES = """
 CREATE TABLE IF NOT EXISTS deal_notes (
     id          TEXT PRIMARY KEY,
@@ -620,6 +633,7 @@ async def ensure_extra_tables():
         await conn.execute(CREATE_NOTES)
         await conn.execute(CREATE_DRIVE_LINKS)
         await conn.execute(CREATE_SOCIAL_LINKS)
+        await conn.execute(CREATE_OUTLOOK_ACCOUNTS)
     logger.info("Extra tables ready")
 
 
@@ -815,3 +829,84 @@ async def get_pipeline_intelligence() -> dict:
         },
         "funnel": funnel,
     }
+
+
+# ── Outlook Accounts ─────────────────────────────────────────────────────────
+
+def _outlook_account_row(row) -> dict:
+    d = dict(row)
+    d["is_default"] = bool(d.get("is_default", 0))
+    return d
+
+
+async def create_outlook_account(
+    tenant_id: str, client_id: str, client_secret: str,
+    sender_email: str, display_name: str, is_default: bool = False,
+) -> dict:
+    account_id = new_id()
+    ts = now_iso()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if is_default:
+            await conn.execute("UPDATE outlook_accounts SET is_default=0")
+        await conn.execute(
+            """INSERT INTO outlook_accounts
+               (id,tenant_id,client_id,client_secret,sender_email,display_name,is_default,created_at,updated_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
+            account_id, tenant_id, client_id, client_secret,
+            sender_email, display_name, 1 if is_default else 0, ts, ts,
+        )
+    return await get_outlook_account(account_id)
+
+
+async def get_outlook_accounts() -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM outlook_accounts ORDER BY is_default DESC, created_at ASC"
+        )
+    return [_outlook_account_row(r) for r in rows]
+
+
+async def get_outlook_account(account_id: str) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM outlook_accounts WHERE id=$1", account_id)
+    return _outlook_account_row(row) if row else None
+
+
+async def get_default_outlook_account() -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM outlook_accounts WHERE is_default=1 LIMIT 1"
+        )
+    return _outlook_account_row(row) if row else None
+
+
+async def update_outlook_account(account_id: str, fields: dict) -> dict | None:
+    ALLOWED = {"tenant_id", "client_id", "client_secret", "sender_email", "display_name", "is_default"}
+    updates = {k: v for k, v in fields.items() if k in ALLOWED and v is not None}
+    if not updates:
+        return await get_outlook_account(account_id)
+    ts = now_iso()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if updates.get("is_default"):
+            await conn.execute("UPDATE outlook_accounts SET is_default=0")
+        # Convert is_default bool to int for storage
+        if "is_default" in updates:
+            updates["is_default"] = 1 if updates["is_default"] else 0
+        set_clauses = ", ".join(f"{col}=${i + 1}" for i, col in enumerate(updates.keys()))
+        values = list(updates.values()) + [ts, account_id]
+        await conn.execute(
+            f"UPDATE outlook_accounts SET {set_clauses}, updated_at=${len(updates) + 1} WHERE id=${len(updates) + 2}",
+            *values,
+        )
+    return await get_outlook_account(account_id)
+
+
+async def delete_outlook_account(account_id: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM outlook_accounts WHERE id=$1", account_id)
