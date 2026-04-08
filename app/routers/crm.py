@@ -154,6 +154,48 @@ async def approve_and_send(deal_id: str, background_tasks: BackgroundTasks):
     return {"queued": True, "deal_id": deal_id, "message": "Email delivery started"}
 
 
+def _build_csv(raw_csv: str | None, approved_leads: list[dict]) -> str:
+    """
+    Return a CSV string for the approved leads.
+
+    If a raw_csv was uploaded, filter it to only the rows whose email
+    matches an approved lead — preserving all original columns exactly.
+    Falls back to leads_to_csv (8 fixed columns) when no raw CSV exists.
+    """
+    if not raw_csv:
+        return leads_to_csv(approved_leads)
+
+    import csv as _csv, io
+
+    approved_emails = {
+        (l.get("email") or "").strip().lower()
+        for l in approved_leads
+        if l.get("email")
+    }
+
+    reader = _csv.DictReader(io.StringIO(raw_csv))
+    if not reader.fieldnames:
+        return leads_to_csv(approved_leads)
+
+    # Detect which column holds the email address
+    email_col = next(
+        (f for f in reader.fieldnames
+         if f.strip().lower() in ("email", "email address", "work email")),
+        None,
+    )
+
+    out = io.StringIO()
+    writer = _csv.DictWriter(out, fieldnames=reader.fieldnames)
+    writer.writeheader()
+    for row in reader:
+        row_email = (row.get(email_col) or "").strip().lower() if email_col else ""
+        # Include the row if its email is approved, or if no email col found include all
+        if not email_col or row_email in approved_emails:
+            writer.writerow(row)
+
+    return out.getvalue()
+
+
 async def _send_approved_leads(deal_id: str, deal: dict):
     """Background task: send the approved lead list and advance the deal."""
     from app.models.schemas import ProspectData
@@ -192,7 +234,7 @@ async def _send_approved_leads(deal_id: str, deal: dict):
         # fall back to all leads if none have been individually approved
         leads = await db.get_leads_for_deal(deal_id)
 
-    csv_data = leads_to_csv(leads)
+    csv_data = _build_csv(deal.get("raw_csv"), leads)
 
     run_id = await db.start_pipeline_run(deal_id)
     await db.update_pipeline_run(run_id, stage="email_delivery")
@@ -233,8 +275,9 @@ async def _send_approved_leads(deal_id: str, deal: dict):
 @router.get("/deals/{deal_id}/leads/csv")
 async def download_leads_csv(deal_id: str, approved_only: bool = False):
     from fastapi.responses import Response
+    deal  = await db.get_deal(deal_id)
     leads = await db.get_leads_for_deal(deal_id, approved_only=approved_only)
-    csv   = leads_to_csv(leads)
+    csv   = _build_csv(deal.get("raw_csv") if deal else None, leads)
     return Response(
         content=csv,
         media_type="text/csv",
@@ -446,6 +489,9 @@ async def upload_leads_csv(deal_id: str, body: dict):
     await db.save_leads(deal_id, run_id, leads)
     await db.finish_pipeline_run(run_id, status="complete")
 
+    # Preserve the original CSV so it can be sent as-is (all columns intact)
+    await db.set_deal_raw_csv(deal_id, csv_text)
+
     logger.info("Uploaded %d leads for deal %s from %s", len(leads), deal_id, filename)
     return {
         "uploaded":  True,
@@ -545,12 +591,11 @@ async def _send_leads_to_prospect_bg(
     subject: str, body_txt: str, filename: str
 ):
     from app.services.outlook import send_email_via_outlook
-    from app.services.apollo import leads_to_csv
     from app.config import settings
 
     # Get leads from DB
     leads = await db.get_leads_for_deal(deal_id, approved_only=False)
-    csv_data = leads_to_csv(leads) if leads else None
+    csv_data = _build_csv(deal.get("raw_csv"), leads) if leads else None
 
     result = await send_email_via_outlook(
         to_email     = deal["email"],

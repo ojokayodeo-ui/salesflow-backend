@@ -174,6 +174,11 @@ async def init_db():
                 await conn.execute(f"ALTER TABLE deals ADD COLUMN IF NOT EXISTS {col} {defn}")
             except Exception:
                 pass
+        # Raw uploaded CSV text (preserved for pass-through delivery)
+        try:
+            await conn.execute("ALTER TABLE deals ADD COLUMN IF NOT EXISTS raw_csv TEXT")
+        except Exception:
+            pass
     logger.info("PostgreSQL database ready")
 
 
@@ -284,6 +289,15 @@ async def update_deal_fields(deal_id: str, fields: dict) -> dict | None:
             *values,
         )
     return await get_deal(deal_id)
+
+
+async def set_deal_raw_csv(deal_id: str, raw_csv: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE deals SET raw_csv=$1, updated_at=$2 WHERE id=$3",
+            raw_csv, now_iso(), deal_id,
+        )
 
 
 async def set_deal_icp(deal_id: str, icp: dict):
