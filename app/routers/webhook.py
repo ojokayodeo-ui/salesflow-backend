@@ -63,7 +63,8 @@ async def stop_sequence_if_active(prospect_email: str) -> bool:
     ]
     for deal in matching:
         await db.stop_sequence(deal["id"], reason="prospect_replied")
-        logger.info("Sequence stopped for %s — deal stays in current stage", prospect_email)
+        await db.cancel_scheduled_emails(deal["id"])
+        logger.info("Sequence stopped + scheduled emails cancelled for %s", prospect_email)
     return bool(matching)
 
 

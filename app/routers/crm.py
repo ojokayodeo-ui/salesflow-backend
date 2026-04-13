@@ -64,7 +64,7 @@ async def update_deal(deal_id: str, body: dict):
 
 @router.patch("/deals/{deal_id}/stage")
 async def update_stage(deal_id: str, stage: str):
-    valid = {"new","icp","pending_review","delivered","meeting","won","lost","cold"}
+    valid = {"new","icp","pending_review","delivered","meeting","won","lost","cold","seq_enrolled"}
     if stage not in valid:
         raise HTTPException(status_code=400, detail=f"Stage must be one of {valid}")
     deal = await db.advance_deal_stage(deal_id, stage)
