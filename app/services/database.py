@@ -184,9 +184,14 @@ def _deal_row(row) -> dict:
     d["history"]    = json.loads(d.pop("history_json", "[]") or "[]")
     d["icp"]        = json.loads(d["icp_json"]) if d.get("icp_json") else None
     d["seq_active"] = bool(d.get("seq_active", 0))
-    # Derive seq_enrolled stage so the frontend never loses it on refresh
-    if d.get("seq_id") and d.get("stage") not in ("meeting", "won"):
-        d["stage"] = "seq_enrolled"
+    # Keep CRM stage in sync with sequence state so the frontend board is correct
+    if d.get("seq_active"):
+        # Actively running a sequence → Sequence Active column
+        if d.get("stage") not in ("meeting", "won"):
+            d["stage"] = "sequence"
+    elif d.get("seq_id") and d.get("stage") == "seq_enrolled":
+        # Old data: was enrolled but stopped, migrate to Leads Delivered
+        d["stage"] = "delivered"
     return d
 
 
