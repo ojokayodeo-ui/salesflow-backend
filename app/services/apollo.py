@@ -127,25 +127,77 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
 
 
 def leads_to_csv(leads: list[dict]) -> str:
-    """Convert lead list to CSV string."""
+    """
+    Convert lead list to CSV string.
+    If leads were uploaded by the user, the original columns are preserved
+    exactly via the raw_json field — so the outgoing CSV matches the upload.
+    Falls back to the standard 8-column format for Apollo-sourced leads.
+    """
+    import csv as _csv, io as _io, json as _json
+
     if not leads:
         return "First Name,Last Name,Title,Company,Email,City,Country,LinkedIn\n"
 
-    rows = ["First Name,Last Name,Title,Company,Email,City,Country,LinkedIn"]
+    # Attempt to reconstruct from raw_json (user-uploaded CSVs)
+    raw_rows = []
     for lead in leads:
-        def esc(v: str) -> str:
-            v = str(v or "").replace('"', '""')
-            return f'"{v}"' if "," in v or '"' in v else v
+        raw = lead.get("raw_json")
+        if raw:
+            try:
+                raw_rows.append(_json.loads(raw) if isinstance(raw, str) else raw)
+            except Exception:
+                raw_rows.append(None)
+        else:
+            raw_rows.append(None)
 
-        rows.append(",".join([
-            esc(lead.get("first_name", "")),
-            esc(lead.get("last_name", "")),
-            esc(lead.get("title", "")),
-            esc(lead.get("company", "")),
-            esc(lead.get("email", "")),
-            esc(lead.get("city", "")),
-            esc(lead.get("country", "")),
-            esc(lead.get("linkedin_url", "")),
-        ]))
+    valid_raws = [r for r in raw_rows if r]
+    if valid_raws:
+        # Use the column order from the first row that has raw data
+        fieldnames = list(valid_raws[0].keys())
+        out = _io.StringIO()
+        writer = _csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
+        writer.writeheader()
+        for i, lead in enumerate(leads):
+            if raw_rows[i]:
+                writer.writerow(raw_rows[i])
+            else:
+                # Lead has no raw data — map what we have into the known columns
+                fallback = {k: "" for k in fieldnames}
+                for key, val in {
+                    "first_name": lead.get("first_name", ""),
+                    "last_name":  lead.get("last_name", ""),
+                    "title":      lead.get("title", ""),
+                    "company":    lead.get("company", ""),
+                    "email":      lead.get("email", ""),
+                    "city":       lead.get("city", ""),
+                    "country":    lead.get("country", ""),
+                    "linkedin_url": lead.get("linkedin_url", ""),
+                }.items():
+                    # Case-insensitive match against fieldnames
+                    for fn in fieldnames:
+                        if fn.lower().replace(" ", "_") == key:
+                            fallback[fn] = val
+                            break
+                writer.writerow(fallback)
+        return out.getvalue()
 
-    return "\n".join(rows)
+    # Fallback: standard fixed columns (Apollo-sourced leads)
+    out = _io.StringIO()
+    writer = _csv.DictWriter(
+        out,
+        fieldnames=["First Name", "Last Name", "Title", "Company", "Email", "City", "Country", "LinkedIn"],
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    for lead in leads:
+        writer.writerow({
+            "First Name": lead.get("first_name", ""),
+            "Last Name":  lead.get("last_name", ""),
+            "Title":      lead.get("title", ""),
+            "Company":    lead.get("company", ""),
+            "Email":      lead.get("email", ""),
+            "City":       lead.get("city", ""),
+            "Country":    lead.get("country", ""),
+            "LinkedIn":   lead.get("linkedin_url", ""),
+        })
+    return out.getvalue()

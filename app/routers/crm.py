@@ -439,6 +439,8 @@ async def upload_leads_csv(deal_id: str, body: dict):
             "city":         g("city", "location"),
             "country":      g("country"),
             "linkedin_url": g("linkedin", "linkedin url", "linkedin_url", "profile url"),
+            # Preserve every original column so the outgoing CSV matches the upload
+            "_raw":         {k.strip(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()},
         })
 
     if not leads:

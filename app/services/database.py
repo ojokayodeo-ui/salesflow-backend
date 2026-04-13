@@ -103,7 +103,8 @@ CREATE TABLE IF NOT EXISTS leads (
     company      TEXT,
     city         TEXT,
     country      TEXT,
-    linkedin_url TEXT
+    linkedin_url TEXT,
+    raw_json     TEXT
 )
 """
 
@@ -174,6 +175,11 @@ async def init_db():
                 await conn.execute(f"ALTER TABLE deals ADD COLUMN IF NOT EXISTS {col} {defn}")
             except Exception:
                 pass
+        # Add raw_json to leads table (preserves all original CSV columns)
+        try:
+            await conn.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS raw_json TEXT")
+        except Exception:
+            pass
     logger.info("PostgreSQL database ready")
 
 
@@ -482,13 +488,14 @@ async def save_leads(deal_id: str, run_id: str, leads: list[dict]):
         await conn.executemany(
             """INSERT INTO leads
                (deal_id,run_id,created_at,approved,first_name,last_name,
-                full_name,title,email,company,city,country,linkedin_url)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)""",
+                full_name,title,email,company,city,country,linkedin_url,raw_json)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)""",
             [
                 (deal_id, run_id, ts, 1,
                  l.get("first_name",""), l.get("last_name",""), l.get("full_name",""),
                  l.get("title",""), l.get("email",""), l.get("company",""),
-                 l.get("city",""), l.get("country",""), l.get("linkedin_url",""))
+                 l.get("city",""), l.get("country",""), l.get("linkedin_url",""),
+                 json.dumps(l["_raw"]) if l.get("_raw") else None)
                 for l in leads
             ],
         )
