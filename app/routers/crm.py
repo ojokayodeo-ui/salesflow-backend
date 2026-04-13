@@ -292,6 +292,8 @@ async def stop_sequence(deal_id: str, body: dict = {}):
         raise HTTPException(status_code=404, detail="Deal not found")
     reason = body.get("reason", "manual")
     await db.stop_sequence(deal_id, reason=reason)
+    from app.services.database import cancel_scheduled_emails
+    await cancel_scheduled_emails(deal_id)
     return {"stopped": True, "deal_id": deal_id, "reason": reason}
 
 
