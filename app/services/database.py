@@ -186,12 +186,12 @@ def _deal_row(row) -> dict:
     d["seq_active"] = bool(d.get("seq_active", 0))
     # Keep CRM stage in sync with sequence state so the frontend board is correct
     if d.get("seq_active"):
-        # Actively running a sequence → Sequence Active column
+        # Actively running → Sequence Active column
         if d.get("stage") not in ("meeting", "won"):
             d["stage"] = "sequence"
-    elif d.get("seq_id") and d.get("stage") == "seq_enrolled":
-        # Old data: was enrolled but stopped, migrate to Leads Delivered
-        d["stage"] = "delivered"
+    elif d.get("seq_id") and d.get("stage") not in ("meeting", "won", "delivered", "lost"):
+        # Had a sequence but it's stopped/completed → Seq Enrolled column
+        d["stage"] = "seq_enrolled"
     return d
 
 
