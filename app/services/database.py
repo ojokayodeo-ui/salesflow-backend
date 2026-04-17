@@ -617,12 +617,26 @@ CREATE TABLE IF NOT EXISTS deal_social_links (
 )"""
 
 
+CREATE_SWIPE_FILES = """
+CREATE TABLE IF NOT EXISTS swipe_files (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    category    TEXT NOT NULL DEFAULT 'general',
+    content     TEXT NOT NULL,
+    source      TEXT DEFAULT '',
+    tags_json   TEXT NOT NULL DEFAULT '[]',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+)"""
+
+
 async def ensure_extra_tables():
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(CREATE_NOTES)
         await conn.execute(CREATE_DRIVE_LINKS)
         await conn.execute(CREATE_SOCIAL_LINKS)
+        await conn.execute(CREATE_SWIPE_FILES)
     logger.info("Extra tables ready")
 
 
@@ -818,3 +832,70 @@ async def get_pipeline_intelligence() -> dict:
         },
         "funnel": funnel,
     }
+
+
+# ── Swipe Files ───────────────────────────────────────────────────────────────
+
+def _swipe_row(row) -> dict:
+    d = dict(row)
+    d["tags"] = json.loads(d.pop("tags_json", "[]") or "[]")
+    return d
+
+
+async def list_swipe_files() -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM swipe_files ORDER BY created_at DESC")
+    return [_swipe_row(r) for r in rows]
+
+
+async def get_swipe_file(sf_id: str) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM swipe_files WHERE id=$1", sf_id)
+    return _swipe_row(row) if row else None
+
+
+async def create_swipe_file(
+    title: str, content: str,
+    category: str = "general", source: str = "", tags: list = []
+) -> dict:
+    sf_id = new_id()
+    ts = now_iso()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO swipe_files
+               (id,title,category,content,source,tags_json,created_at,updated_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+            sf_id, title, category, content, source, json.dumps(tags), ts, ts,
+        )
+    return await get_swipe_file(sf_id)
+
+
+async def update_swipe_file(sf_id: str, fields: dict) -> dict | None:
+    ALLOWED = {"title", "category", "content", "source"}
+    updates = {}
+    if "tags" in fields:
+        updates["tags_json"] = json.dumps(fields["tags"])
+    for k, v in fields.items():
+        if k in ALLOWED:
+            updates[k] = v
+    if not updates:
+        return await get_swipe_file(sf_id)
+    ts = now_iso()
+    set_clauses = ", ".join(f"{col}=${i+1}" for i, col in enumerate(updates.keys()))
+    values = list(updates.values()) + [ts, sf_id]
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE swipe_files SET {set_clauses}, updated_at=${len(updates)+1} WHERE id=${len(updates)+2}",
+            *values,
+        )
+    return await get_swipe_file(sf_id)
+
+
+async def delete_swipe_file(sf_id: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM swipe_files WHERE id=$1", sf_id)
