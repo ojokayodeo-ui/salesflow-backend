@@ -93,6 +93,38 @@ def _build_message(
     return message
 
 
+async def get_messages(folder: str = "inbox", top: int = 50) -> list[dict]:
+    """Fetch messages from a mail folder via Graph API. Requires Mail.Read permission."""
+    token = await get_access_token()
+    folder_map = {"inbox": "inbox", "sent": "sentItems"}
+    folder_path = folder_map.get(folder, folder)
+    url = f"{GRAPH_BASE}/users/{settings.ms_sender_email}/mailFolders/{folder_path}/messages"
+    params = {
+        "$top": min(top, 100),
+        "$select": "id,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments,conversationId",
+        "$orderby": "receivedDateTime desc",
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(url, headers=headers, params=params)
+        resp.raise_for_status()
+    return resp.json().get("value", [])
+
+
+async def get_message_body(message_id: str) -> dict:
+    """Fetch a single message with full HTML/text body."""
+    token = await get_access_token()
+    url = f"{GRAPH_BASE}/users/{settings.ms_sender_email}/messages/{message_id}"
+    params = {
+        "$select": "id,subject,from,toRecipients,receivedDateTime,body,isRead,conversationId,hasAttachments"
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.get(url, headers=headers, params=params)
+        resp.raise_for_status()
+    return resp.json()
+
+
 async def send_email_via_outlook(
     to_email:    str,
     to_name:     str,
