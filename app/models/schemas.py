@@ -11,6 +11,7 @@ class EmailRequest(BaseModel):
     attach_csv: bool = True
     csv_data: Optional[str] = None
     csv_filename: str = "leads_100.csv"
+    deal_id: Optional[str] = None
 
 
 class EmailResponse(BaseModel):

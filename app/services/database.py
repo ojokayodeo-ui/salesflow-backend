@@ -641,6 +641,19 @@ CREATE TABLE IF NOT EXISTS swipe_files (
     updated_at  TEXT NOT NULL
 )"""
 
+CREATE_EMAIL_EVENTS = """
+CREATE TABLE IF NOT EXISTS email_events (
+    id          TEXT PRIMARY KEY,
+    deal_id     TEXT NOT NULL,
+    token       TEXT UNIQUE NOT NULL,
+    direction   TEXT NOT NULL,
+    subject     TEXT DEFAULT '',
+    sent_at     TEXT NOT NULL,
+    opened_at   TEXT,
+    open_count  INTEGER DEFAULT 0,
+    created_at  TEXT NOT NULL
+)"""
+
 
 async def ensure_extra_tables():
     pool = await get_pool()
@@ -649,6 +662,7 @@ async def ensure_extra_tables():
         await conn.execute(CREATE_DRIVE_LINKS)
         await conn.execute(CREATE_SOCIAL_LINKS)
         await conn.execute(CREATE_SWIPE_FILES)
+        await conn.execute(CREATE_EMAIL_EVENTS)
     logger.info("Extra tables ready")
 
 
@@ -911,3 +925,58 @@ async def delete_swipe_file(sf_id: str):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM swipe_files WHERE id=$1", sf_id)
+
+
+# ── Email Events (tracking) ──────────────────────────────────────────────────
+
+async def save_email_event(
+    deal_id: str, token: str, direction: str, subject: str
+) -> str:
+    eid = new_id()
+    ts = now_iso()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO email_events
+               (id, deal_id, token, direction, subject, sent_at, open_count, created_at)
+               VALUES ($1,$2,$3,$4,$5,$6,0,$7)""",
+            eid, deal_id, token, direction, subject, ts, ts,
+        )
+    return eid
+
+
+async def record_email_open(token: str) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, opened_at FROM email_events WHERE token=$1", token
+        )
+        if not row:
+            return False
+        ts = now_iso()
+        first_open = row["opened_at"] or ts
+        await conn.execute(
+            "UPDATE email_events SET open_count=open_count+1, opened_at=$1 WHERE token=$2",
+            first_open, token,
+        )
+    return True
+
+
+async def get_email_metrics(deal_id: str) -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM email_events WHERE deal_id=$1 ORDER BY sent_at DESC", deal_id
+        )
+    events = [dict(r) for r in rows]
+    sent     = [e for e in events if e["direction"] == "sent"]
+    received = [e for e in events if e["direction"] == "received"]
+    return {
+        "sent_count":    len(sent),
+        "received_count": len(received),
+        "total_opens":   sum(e.get("open_count", 0) for e in sent),
+        "opened_count":  sum(1 for e in sent if (e.get("open_count") or 0) > 0),
+        "last_sent":     sent[0]["sent_at"] if sent else None,
+        "last_received": received[0]["sent_at"] if received else None,
+        "events":        events[:20],
+    }

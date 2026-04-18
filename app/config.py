@@ -15,5 +15,6 @@ class Settings:
         self.auto_send_email          = os.environ.get("AUTO_SEND_EMAIL", "true").lower() == "true"
         self.default_from_name        = os.environ.get("DEFAULT_FROM_NAME", "Kayode · PALM")
         self.default_email_template   = os.environ.get("DEFAULT_EMAIL_TEMPLATE", "warm")
+        self.backend_url              = os.environ.get("BACKEND_URL", "").rstrip("/")
 
 settings = Settings()

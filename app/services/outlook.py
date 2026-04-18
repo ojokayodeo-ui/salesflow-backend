@@ -14,6 +14,7 @@ Setup steps:
 
 import base64
 import logging
+import secrets
 import httpx
 from app.config import settings
 
@@ -41,6 +42,14 @@ async def get_access_token() -> str:
         return response.json()["access_token"]
 
 
+def _text_to_html(text: str, tracking_pixel_url: str | None = None) -> str:
+    """Convert plain text email body to HTML, optionally appending a tracking pixel."""
+    html = "<p>" + text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\r\n", "\n").replace("\n\n", "</p><p>").replace("\n", "<br>") + "</p>"
+    if tracking_pixel_url:
+        html += f'<img src="{tracking_pixel_url}" width="1" height="1" style="display:none;border:0" alt="" />'
+    return html
+
+
 def _build_message(
     to_email:    str,
     to_name:     str,
@@ -49,17 +58,20 @@ def _build_message(
     body:        str,
     csv_data:    str | None = None,
     csv_filename: str = "leads_100.csv",
+    tracking_pixel_url: str | None = None,
 ) -> dict:
     """
     Construct the Graph API sendMail message object.
     Attaches the CSV as a base64 file attachment when csv_data is provided.
+    Always sends as HTML so tracking pixel works.
     """
+    html_body = _text_to_html(body, tracking_pixel_url)
     message: dict = {
         "subject": subject,
         "importance": "normal",
         "body": {
-            "contentType": "Text",
-            "content": body,
+            "contentType": "HTML",
+            "content": html_body,
         },
         "from": {
             "emailAddress": {
@@ -133,6 +145,7 @@ async def send_email_via_outlook(
     body:        str,
     csv_data:    str | None = None,
     csv_filename: str = "leads_100.csv",
+    deal_id:     str | None = None,
 ) -> dict:
     """
     Send an email through Microsoft Graph on behalf of the configured
@@ -142,6 +155,13 @@ async def send_email_via_outlook(
     try:
         token = await get_access_token()
 
+        # Generate tracking pixel if deal_id and backend URL are configured
+        tracking_pixel_url = None
+        tracking_token = None
+        if deal_id and settings.backend_url:
+            tracking_token = secrets.token_urlsafe(24)
+            tracking_pixel_url = f"{settings.backend_url}/api/mail/track/{tracking_token}"
+
         message = _build_message(
             to_email=to_email,
             to_name=to_name,
@@ -150,6 +170,7 @@ async def send_email_via_outlook(
             body=body,
             csv_data=csv_data,
             csv_filename=csv_filename,
+            tracking_pixel_url=tracking_pixel_url,
         )
 
         # POST /users/{sender}/sendMail
@@ -166,10 +187,16 @@ async def send_email_via_outlook(
         # Graph returns 202 Accepted on success (no body)
         if resp.status_code == 202:
             logger.info("Email sent to %s via Outlook Graph API", to_email)
-            # Graph doesn't return a message ID on sendMail, so we fabricate one
-            # from the recipient + timestamp for traceability.
             import time
             message_id = f"graph-{to_email}-{int(time.time())}"
+            # Save tracking event to DB if we generated a pixel
+            if deal_id and tracking_token:
+                try:
+                    from app.services import database as db
+                    await db.save_email_event(deal_id, tracking_token, "sent", subject)
+                    logger.info("Email event saved for deal %s token %s", deal_id, tracking_token[:8])
+                except Exception as exc:
+                    logger.warning("Failed to save email event: %s", exc)
             return {"success": True, "message_id": message_id}
 
         # Anything else is an error

@@ -564,6 +564,7 @@ async def _send_leads_to_prospect_bg(
         body         = body_txt,
         csv_data     = csv_data,
         csv_filename = filename,
+        deal_id      = deal_id,
     )
 
     if result.get("success"):

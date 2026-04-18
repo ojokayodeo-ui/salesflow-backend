@@ -21,6 +21,7 @@ async def send_delivery_email(req: EmailRequest):
         body=req.body,
         csv_data=req.csv_data if req.attach_csv else None,
         csv_filename=req.csv_filename,
+        deal_id=req.deal_id,
     )
 
     if not result["success"]:
