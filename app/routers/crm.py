@@ -648,7 +648,7 @@ Write a warm, professional email delivering the lead list. 3 short paragraphs. N
                     "anthropic-version": "2023-06-01",
                 },
                 json={
-                    "model": "claude-sonnet-4-20250514",
+                    "model": "claude-sonnet-4-6",
                     "max_tokens": 500,
                     "messages": [{"role": "user", "content": prompt}],
                 },

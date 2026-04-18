@@ -228,7 +228,7 @@ async def inbox_sync(top: int = Query(100, le=200)):
 
         if resp.status_code == 403:
             raise HTTPException(status_code=403, detail=PERMISSION_HINT)
-        if not resp.ok:
+        if not resp.is_success:
             raise HTTPException(status_code=502, detail=f"Graph API error: {resp.status_code}")
 
         messages = resp.json().get("value", [])

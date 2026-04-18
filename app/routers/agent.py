@@ -14,7 +14,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
-CLAUDE_MODEL   = "claude-sonnet-4-20250514"
+CLAUDE_MODEL   = "claude-sonnet-4-6"
 
 STAGE_PLAYBOOK = {
     "new":            "Fresh lead. Goal: qualify fast, understand their situation, book a discovery call within 48h.",
