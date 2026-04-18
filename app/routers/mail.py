@@ -116,7 +116,6 @@ async def debug_mail_thread(email: str = Query(...)):
                 "$select": "id,subject,receivedDateTime,bodyPreview,isRead",
                 "$top": 5,
             })
-            # sentItems doesn't support KQL "to:" prefix — use $filter instead
             r2 = await client.get(sent_url, headers=headers, params={
                 "$filter": f"toRecipients/any(r:r/emailAddress/address eq '{email}')",
                 "$select": "id,subject,sentDateTime,bodyPreview",
@@ -159,12 +158,11 @@ async def mail_for_deal(email: str = Query(...), top: int = Query(20, le=50)):
                     "$select": "id,subject,receivedDateTime,bodyPreview,isRead,conversationId",
                     "$top": top,
                 }),
-                # sentItems doesn't support KQL "to:" — use OData $filter instead
+                # sentItems: KQL "to:" not supported — use OData $filter; no $orderby (incompatible with $filter on this endpoint)
                 client.get(sent_url, headers=headers, params={
                     "$filter": f"toRecipients/any(r:r/emailAddress/address eq '{email}')",
                     "$select": "id,subject,sentDateTime,bodyPreview,conversationId",
                     "$top": top,
-                    "$orderby": "sentDateTime desc",
                 }),
             )
 
@@ -201,7 +199,7 @@ async def mail_for_deal(email: str = Query(...), top: int = Query(20, le=50)):
             raise HTTPException(status_code=403, detail=PERMISSION_HINT)
         raise HTTPException(status_code=502, detail=f"Graph API error: {exc.response.status_code}")
     except Exception as exc:
-        logger.exception("Failed to fetch mail for deal %s", prospect_email)
+        logger.exception("Failed to fetch mail for deal %s", email)
         raise HTTPException(status_code=502, detail=str(exc))
 
 
