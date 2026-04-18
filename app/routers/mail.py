@@ -102,7 +102,7 @@ async def track_open(token: str):
 async def mail_for_deal(prospect_email: str, top: int = Query(20, le=50)):
     """
     Fetch inbox + sent messages matching a prospect's email address via Graph filter.
-    Requires Mail.Read.
+    Requires Mail.Read. Note: $orderby is omitted with $filter to avoid Graph API errors.
     """
     if not settings.ms_sender_email:
         raise HTTPException(status_code=503, detail="MS_SENDER_EMAIL not configured")
@@ -112,12 +112,13 @@ async def mail_for_deal(prospect_email: str, top: int = Query(20, le=50)):
 
         safe_email = prospect_email.replace("'", "''")
 
+        # Note: $orderby cannot be combined with $filter on most Graph endpoints
+        # — we sort in Python after fetching.
         inbox_url = f"{GRAPH_BASE}/users/{settings.ms_sender_email}/messages"
         inbox_params = {
             "$filter": f"from/emailAddress/address eq '{safe_email}'",
             "$select": "id,subject,receivedDateTime,bodyPreview,isRead,conversationId",
             "$top": top,
-            "$orderby": "receivedDateTime desc",
         }
 
         sent_url = f"{GRAPH_BASE}/users/{settings.ms_sender_email}/sentItems"
@@ -125,24 +126,27 @@ async def mail_for_deal(prospect_email: str, top: int = Query(20, le=50)):
             "$filter": f"toRecipients/any(r: r/emailAddress/address eq '{safe_email}')",
             "$select": "id,subject,sentDateTime,bodyPreview,conversationId",
             "$top": top,
-            "$orderby": "sentDateTime desc",
         }
 
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=30) as client:
             inbox_resp, sent_resp = await asyncio.gather(
                 client.get(inbox_url, headers=headers, params=inbox_params),
                 client.get(sent_url, headers=headers, params=sent_params),
             )
-            inbox_resp.raise_for_status()
-            sent_resp.raise_for_status()
+
+        # Log errors but don't raise — return what we have
+        if inbox_resp.status_code not in (200, 206):
+            logger.warning("Inbox filter error %s: %s", inbox_resp.status_code, inbox_resp.text[:300])
+        if sent_resp.status_code not in (200, 206):
+            logger.warning("Sent filter error %s: %s", sent_resp.status_code, sent_resp.text[:300])
 
         received = [
             {"direction": "received", "date": m.get("receivedDateTime"), **m}
-            for m in inbox_resp.json().get("value", [])
+            for m in (inbox_resp.json().get("value", []) if inbox_resp.status_code == 200 else [])
         ]
         sent_msgs = [
             {"direction": "sent", "date": m.get("sentDateTime"), **m}
-            for m in sent_resp.json().get("value", [])
+            for m in (sent_resp.json().get("value", []) if sent_resp.status_code == 200 else [])
         ]
 
         all_msgs = sorted(
