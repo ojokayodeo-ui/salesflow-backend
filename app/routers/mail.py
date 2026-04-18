@@ -98,11 +98,48 @@ async def track_open(token: str):
 
 # ── Deal-Matched Mail Thread ──────────────────────────────────────────────────
 
+@router.get("/debug-thread/{prospect_email}")
+async def debug_mail_thread(prospect_email: str):
+    """Debug: returns raw Graph API responses for both inbox search and sent search."""
+    if not settings.ms_sender_email:
+        return {"error": "MS_SENDER_EMAIL not set"}
+    try:
+        token = await get_access_token()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        inbox_url = f"{GRAPH_BASE}/users/{settings.ms_sender_email}/messages"
+        sent_url  = f"{GRAPH_BASE}/users/{settings.ms_sender_email}/sentItems"
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            r1 = await client.get(inbox_url, headers=headers, params={
+                "$search": f'"from:{prospect_email}"',
+                "$select": "id,subject,receivedDateTime,bodyPreview,isRead",
+                "$top": 5,
+            })
+            r2 = await client.get(sent_url, headers=headers, params={
+                "$search": f'"to:{prospect_email}"',
+                "$select": "id,subject,sentDateTime,bodyPreview",
+                "$top": 5,
+            })
+
+        return {
+            "sender_mailbox": settings.ms_sender_email,
+            "prospect_email": prospect_email,
+            "inbox_status": r1.status_code,
+            "inbox_body": r1.json() if r1.headers.get("content-type","").startswith("application/json") else r1.text[:500],
+            "sent_status": r2.status_code,
+            "sent_body": r2.json() if r2.headers.get("content-type","").startswith("application/json") else r2.text[:500],
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 @router.get("/for-deal/{prospect_email}")
 async def mail_for_deal(prospect_email: str, top: int = Query(20, le=50)):
     """
-    Fetch inbox + sent messages matching a prospect's email address via Graph filter.
-    Requires Mail.Read. Note: $orderby is omitted with $filter to avoid Graph API errors.
+    Fetch inbox + sent messages matching a prospect using KQL $search.
+    KQL search is more compatible than $filter for message endpoints.
+    Requires Mail.Read.
     """
     if not settings.ms_sender_email:
         raise HTTPException(status_code=503, detail="MS_SENDER_EMAIL not configured")
@@ -110,35 +147,27 @@ async def mail_for_deal(prospect_email: str, top: int = Query(20, le=50)):
         token = await get_access_token()
         headers = {"Authorization": f"Bearer {token}"}
 
-        safe_email = prospect_email.replace("'", "''")
-
-        # Note: $orderby cannot be combined with $filter on most Graph endpoints
-        # — we sort in Python after fetching.
         inbox_url = f"{GRAPH_BASE}/users/{settings.ms_sender_email}/messages"
-        inbox_params = {
-            "$filter": f"from/emailAddress/address eq '{safe_email}'",
-            "$select": "id,subject,receivedDateTime,bodyPreview,isRead,conversationId",
-            "$top": top,
-        }
-
-        sent_url = f"{GRAPH_BASE}/users/{settings.ms_sender_email}/sentItems"
-        sent_params = {
-            "$filter": f"toRecipients/any(r: r/emailAddress/address eq '{safe_email}')",
-            "$select": "id,subject,sentDateTime,bodyPreview,conversationId",
-            "$top": top,
-        }
+        sent_url  = f"{GRAPH_BASE}/users/{settings.ms_sender_email}/sentItems"
 
         async with httpx.AsyncClient(timeout=30) as client:
             inbox_resp, sent_resp = await asyncio.gather(
-                client.get(inbox_url, headers=headers, params=inbox_params),
-                client.get(sent_url, headers=headers, params=sent_params),
+                client.get(inbox_url, headers=headers, params={
+                    "$search": f'"from:{prospect_email}"',
+                    "$select": "id,subject,receivedDateTime,bodyPreview,isRead,conversationId",
+                    "$top": top,
+                }),
+                client.get(sent_url, headers=headers, params={
+                    "$search": f'"to:{prospect_email}"',
+                    "$select": "id,subject,sentDateTime,bodyPreview,conversationId",
+                    "$top": top,
+                }),
             )
 
-        # Log errors but don't raise — return what we have
         if inbox_resp.status_code not in (200, 206):
-            logger.warning("Inbox filter error %s: %s", inbox_resp.status_code, inbox_resp.text[:300])
+            logger.warning("Inbox search error %s: %s", inbox_resp.status_code, inbox_resp.text[:400])
         if sent_resp.status_code not in (200, 206):
-            logger.warning("Sent filter error %s: %s", sent_resp.status_code, sent_resp.text[:300])
+            logger.warning("Sent search error %s: %s", sent_resp.status_code, sent_resp.text[:400])
 
         received = [
             {"direction": "received", "date": m.get("receivedDateTime"), **m}
@@ -159,6 +188,8 @@ async def mail_for_deal(prospect_email: str, top: int = Query(20, le=50)):
             "messages": all_msgs,
             "received_count": len(received),
             "sent_count": len(sent_msgs),
+            "inbox_status": inbox_resp.status_code,
+            "sent_status": sent_resp.status_code,
         }
 
     except httpx.HTTPStatusError as exc:
