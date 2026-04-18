@@ -98,8 +98,8 @@ async def track_open(token: str):
 
 # ── Deal-Matched Mail Thread ──────────────────────────────────────────────────
 
-@router.get("/debug-thread/{prospect_email}")
-async def debug_mail_thread(prospect_email: str):
+@router.get("/debug-thread")
+async def debug_mail_thread(email: str = Query(...)):
     """Debug: returns raw Graph API responses for both inbox search and sent search."""
     if not settings.ms_sender_email:
         return {"error": "MS_SENDER_EMAIL not set"}
@@ -112,19 +112,19 @@ async def debug_mail_thread(prospect_email: str):
 
         async with httpx.AsyncClient(timeout=30) as client:
             r1 = await client.get(inbox_url, headers=headers, params={
-                "$search": f'"from:{prospect_email}"',
+                "$search": f'"from:{email}"',
                 "$select": "id,subject,receivedDateTime,bodyPreview,isRead",
                 "$top": 5,
             })
             r2 = await client.get(sent_url, headers=headers, params={
-                "$search": f'"to:{prospect_email}"',
+                "$search": f'"to:{email}"',
                 "$select": "id,subject,sentDateTime,bodyPreview",
                 "$top": 5,
             })
 
         return {
             "sender_mailbox": settings.ms_sender_email,
-            "prospect_email": prospect_email,
+            "prospect_email": email,
             "inbox_status": r1.status_code,
             "inbox_body": r1.json() if r1.headers.get("content-type","").startswith("application/json") else r1.text[:500],
             "sent_status": r2.status_code,
@@ -134,8 +134,8 @@ async def debug_mail_thread(prospect_email: str):
         return {"error": str(exc)}
 
 
-@router.get("/for-deal/{prospect_email}")
-async def mail_for_deal(prospect_email: str, top: int = Query(20, le=50)):
+@router.get("/for-deal")
+async def mail_for_deal(email: str = Query(...), top: int = Query(20, le=50)):
     """
     Fetch inbox + sent messages matching a prospect using KQL $search.
     KQL search is more compatible than $filter for message endpoints.
@@ -153,12 +153,12 @@ async def mail_for_deal(prospect_email: str, top: int = Query(20, le=50)):
         async with httpx.AsyncClient(timeout=30) as client:
             inbox_resp, sent_resp = await asyncio.gather(
                 client.get(inbox_url, headers=headers, params={
-                    "$search": f'"from:{prospect_email}"',
+                    "$search": f'"from:{email}"',
                     "$select": "id,subject,receivedDateTime,bodyPreview,isRead,conversationId",
                     "$top": top,
                 }),
                 client.get(sent_url, headers=headers, params={
-                    "$search": f'"to:{prospect_email}"',
+                    "$search": f'"to:{email}"',
                     "$select": "id,subject,sentDateTime,bodyPreview,conversationId",
                     "$top": top,
                 }),
