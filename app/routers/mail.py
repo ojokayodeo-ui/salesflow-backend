@@ -116,8 +116,9 @@ async def debug_mail_thread(email: str = Query(...)):
                 "$select": "id,subject,receivedDateTime,bodyPreview,isRead",
                 "$top": 5,
             })
+            # sentItems doesn't support KQL "to:" prefix — use $filter instead
             r2 = await client.get(sent_url, headers=headers, params={
-                "$search": f'"to:{email}"',
+                "$filter": f"toRecipients/any(r:r/emailAddress/address eq '{email}')",
                 "$select": "id,subject,sentDateTime,bodyPreview",
                 "$top": 5,
             })
@@ -137,8 +138,9 @@ async def debug_mail_thread(email: str = Query(...)):
 @router.get("/for-deal")
 async def mail_for_deal(email: str = Query(...), top: int = Query(20, le=50)):
     """
-    Fetch inbox + sent messages matching a prospect using KQL $search.
-    KQL search is more compatible than $filter for message endpoints.
+    Fetch inbox + sent messages matching a prospect.
+    Inbox: KQL $search "from:{email}" (supports full-text).
+    SentItems: OData $filter on toRecipients (KQL "to:" not supported on sentItems).
     Requires Mail.Read.
     """
     if not settings.ms_sender_email:
@@ -157,10 +159,12 @@ async def mail_for_deal(email: str = Query(...), top: int = Query(20, le=50)):
                     "$select": "id,subject,receivedDateTime,bodyPreview,isRead,conversationId",
                     "$top": top,
                 }),
+                # sentItems doesn't support KQL "to:" — use OData $filter instead
                 client.get(sent_url, headers=headers, params={
-                    "$search": f'"to:{email}"',
+                    "$filter": f"toRecipients/any(r:r/emailAddress/address eq '{email}')",
                     "$select": "id,subject,sentDateTime,bodyPreview,conversationId",
                     "$top": top,
+                    "$orderby": "sentDateTime desc",
                 }),
             )
 
