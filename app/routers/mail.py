@@ -203,6 +203,69 @@ async def mail_for_deal(email: str = Query(...), top: int = Query(20, le=50)):
         raise HTTPException(status_code=502, detail=str(exc))
 
 
+# ── Inbox Sync — match inbox senders to deal cards ───────────────────────────
+
+@router.get("/inbox-sync")
+async def inbox_sync(top: int = Query(100, le=200)):
+    """
+    Fetch recent inbox messages and group by sender email.
+    Frontend uses this to highlight deal cards that have unread replies.
+    Returns: {by_email: {email: {count, unread, latest_subject, latest_date}}}
+    """
+    if not settings.ms_sender_email:
+        raise HTTPException(status_code=503, detail="MS_SENDER_EMAIL not configured")
+    try:
+        token = await get_access_token()
+        headers = {"Authorization": f"Bearer {token}"}
+        url = f"{GRAPH_BASE}/users/{settings.ms_sender_email}/messages"
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers=headers, params={
+                "$select": "id,subject,receivedDateTime,isRead,from,bodyPreview",
+                "$top": top,
+                "$orderby": "receivedDateTime desc",
+            })
+
+        if resp.status_code == 403:
+            raise HTTPException(status_code=403, detail=PERMISSION_HINT)
+        if not resp.ok:
+            raise HTTPException(status_code=502, detail=f"Graph API error: {resp.status_code}")
+
+        messages = resp.json().get("value", [])
+        by_email: dict = {}
+        for m in messages:
+            frm = m.get("from", {}).get("emailAddress", {})
+            addr = (frm.get("address") or "").lower()
+            if not addr:
+                continue
+            if addr not in by_email:
+                by_email[addr] = {
+                    "count": 0, "unread": 0,
+                    "latest_subject": m.get("subject", ""),
+                    "latest_date": m.get("receivedDateTime", ""),
+                    "latest_preview": m.get("bodyPreview", ""),
+                }
+            by_email[addr]["count"] += 1
+            if not m.get("isRead"):
+                by_email[addr]["unread"] += 1
+
+        return {
+            "by_email": by_email,
+            "total_fetched": len(messages),
+            "mailbox": settings.ms_sender_email,
+        }
+
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 403:
+            raise HTTPException(status_code=403, detail=PERMISSION_HINT)
+        raise HTTPException(status_code=502, detail=f"Graph API error: {exc.response.status_code}")
+    except Exception as exc:
+        logger.exception("inbox-sync failed")
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
 # ── Deal Email Metrics ────────────────────────────────────────────────────────
 
 @router.get("/metrics/{deal_id}")
