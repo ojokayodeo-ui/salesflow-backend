@@ -110,12 +110,14 @@ async def update_swipe_file(file_id: str, body: dict):
     if not existing:
         raise HTTPException(status_code=404, detail="Swipe file not found")
     file = await db.update_swipe_file(
-        file_id  = file_id,
-        title    = body.get("title", existing["title"]).strip(),
-        category = body.get("category", existing["category"]).strip(),
-        content  = body.get("content", existing["content"]).strip(),
-        source   = body.get("source", existing.get("source", "")).strip(),
-        tags     = body.get("tags", existing.get("tags", [])),
+        sf_id  = file_id,
+        fields = {
+            "title":    body.get("title",    existing["title"]).strip(),
+            "category": body.get("category", existing["category"]).strip(),
+            "content":  body.get("content",  existing["content"]).strip(),
+            "source":   body.get("source",   existing.get("source", "")).strip(),
+            "tags":     body.get("tags",     existing.get("tags", [])),
+        },
     )
     return {"swipe_file": file}
 
