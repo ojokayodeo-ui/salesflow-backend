@@ -79,8 +79,54 @@ def _extract_docx_text(data: bytes) -> str:
     except Exception as exc:
         return f"[DOCX extraction error: {exc}]"
 
+def _extract_epub_text(data: bytes) -> str:
+    """Extract plain text from an EPUB file (ZIP of HTML/XHTML chapters)."""
+    import zipfile
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            # Collect content documents in spine order if possible, else alphabetical
+            names = zf.namelist()
 
-# ── Swipe Files ──────────────────────────────────────────────────────────────
+            # Try to read the OPF spine for correct reading order
+            opf_name = next(
+                (n for n in names if n.endswith(".opf")), None
+            )
+            ordered: list[str] = []
+            if opf_name:
+                try:
+                    opf_xml = zf.read(opf_name).decode("utf-8", errors="replace")
+                    # Extract href values from <itemref> spine order via simple regex
+                    import re as _re
+                    idref_order = _re.findall(r'<itemref[^>]+idref=["\']([^"\']+)["\']', opf_xml)
+                    id_to_href  = dict(_re.findall(r'<item[^>]+id=["\']([^"\']+)["\'][^>]+href=["\']([^"\']+)["\']', opf_xml))
+                    base        = opf_name.rsplit("/", 1)[0] + "/" if "/" in opf_name else ""
+                    for idref in idref_order:
+                        href = id_to_href.get(idref, "")
+                        if href:
+                            full = (base + href).lstrip("/")
+                            if full in names:
+                                ordered.append(full)
+                except Exception:
+                    pass
+
+            if not ordered:
+                ordered = sorted(
+                    n for n in names
+                    if n.lower().endswith((".xhtml", ".html", ".htm"))
+                    and "__MACOSX" not in n
+                )
+
+            texts = []
+            for name in ordered:
+                try:
+                    html_bytes = zf.read(name)
+                    texts.append(_extract_html_text(html_bytes.decode("utf-8", errors="replace")))
+                except Exception:
+                    continue
+            return "\n\n".join(t for t in texts if t.strip())
+    except Exception as exc:
+        return f"[EPUB extraction error: {exc}]"
+
 
 @router.get("/swipe-files")
 async def list_swipe_files():
@@ -138,7 +184,7 @@ async def upload_swipe_file(
     category: str        = Form("general"),
     tags:     str        = Form(""),
 ):
-    """Upload a PDF, DOCX, or TXT file and save it as a swipe file."""
+    """Upload a PDF, DOCX, EPUB, or TXT file and save it as a swipe file."""
     data = await file.read()
     filename = file.filename or "upload"
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "txt"
@@ -147,6 +193,8 @@ async def upload_swipe_file(
         text = _extract_pdf_text(data)
     elif ext in ("docx", "doc"):
         text = _extract_docx_text(data)
+    elif ext == "epub":
+        text = _extract_epub_text(data)
     elif ext in ("html", "htm"):
         text = _extract_html_text(data.decode("utf-8", errors="replace"))
     else:
