@@ -12,6 +12,7 @@ from html.parser import HTMLParser
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from app.services import database as db
+from app.services.outlook import send_email_via_outlook
 from app.config import settings
 
 router = APIRouter()
@@ -380,3 +381,208 @@ async def compose_nurture_email(body: dict):
     except Exception as exc:
         logger.exception("Nurture compose failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Nurture Sequences ─────────────────────────────────────────────────────────
+
+@router.get("/sequences")
+async def list_sequences():
+    seqs = await db.list_nurture_sequences()
+    return {"sequences": seqs}
+
+
+@router.post("/sequences")
+async def create_sequence(body: dict):
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name required")
+    seq = await db.create_nurture_sequence(name, body.get("description", "").strip())
+    return {"sequence": seq}
+
+
+@router.patch("/sequences/{seq_id}")
+async def update_sequence(seq_id: str, body: dict):
+    existing = await db.get_nurture_sequence(seq_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    seq = await db.update_nurture_sequence(seq_id, {
+        "name": body.get("name", existing["name"]).strip(),
+        "description": body.get("description", existing["description"]).strip(),
+    })
+    return {"sequence": seq}
+
+
+@router.delete("/sequences/{seq_id}")
+async def delete_sequence(seq_id: str):
+    existing = await db.get_nurture_sequence(seq_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    await db.delete_nurture_sequence(seq_id)
+    return {"deleted": True, "id": seq_id}
+
+
+@router.get("/sequences/{seq_id}/steps")
+async def list_steps(seq_id: str):
+    steps = await db.get_nurture_steps(seq_id)
+    return {"steps": steps}
+
+
+@router.post("/sequences/{seq_id}/steps")
+async def add_step(seq_id: str, body: dict):
+    existing = await db.get_nurture_sequence(seq_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    steps = await db.get_nurture_steps(seq_id)
+    step_order = body.get("step_order", len(steps) + 1)
+    step = await db.add_nurture_step(
+        sequence_id=seq_id,
+        step_order=int(step_order),
+        subject=body.get("subject", "").strip(),
+        body=body.get("body", "").strip(),
+        delay_days=int(body.get("delay_days", 0)),
+    )
+    return {"step": step}
+
+
+@router.patch("/sequences/{seq_id}/steps/{step_id}")
+async def update_step(seq_id: str, step_id: str, body: dict):
+    step = await db.update_nurture_step(step_id, {
+        "subject": body.get("subject", ""),
+        "body": body.get("body", ""),
+        "delay_days": int(body.get("delay_days", 0)),
+        "step_order": int(body.get("step_order", 1)),
+    })
+    if not step:
+        raise HTTPException(status_code=404, detail="Step not found")
+    return {"step": step}
+
+
+@router.delete("/sequences/{seq_id}/steps/{step_id}")
+async def delete_step(seq_id: str, step_id: str):
+    await db.delete_nurture_step(step_id)
+    return {"deleted": True, "id": step_id}
+
+
+# ── Enrollments ───────────────────────────────────────────────────────────────
+
+@router.get("/enrollments")
+async def list_enrollments(status: str = ""):
+    enrollments = await db.list_nurture_enrollments(status or None)
+    return {"enrollments": enrollments}
+
+
+@router.post("/enroll")
+async def enroll_deal(body: dict):
+    sequence_id = (body.get("sequence_id") or "").strip()
+    deal_id = (body.get("deal_id") or "").strip()
+    if not sequence_id or not deal_id:
+        raise HTTPException(status_code=422, detail="sequence_id and deal_id required")
+    seq = await db.get_nurture_sequence(sequence_id)
+    if not seq:
+        raise HTTPException(status_code=404, detail="Sequence not found")
+    deal = await db.get_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    if not deal.get("email"):
+        raise HTTPException(status_code=422, detail="Deal has no email address")
+    enrollment = await db.create_nurture_enrollment(sequence_id, deal_id)
+    logger.info("Deal %s enrolled in sequence %s", deal_id, sequence_id)
+    return {"enrollment": enrollment}
+
+
+@router.delete("/enrollments/{enrollment_id}")
+async def cancel_enrollment(enrollment_id: str):
+    e = await db.get_nurture_enrollment(enrollment_id)
+    if not e:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+    await db.delete_nurture_enrollment(enrollment_id)
+    return {"deleted": True, "id": enrollment_id}
+
+
+@router.patch("/enrollments/{enrollment_id}/status")
+async def set_enrollment_status(enrollment_id: str, body: dict):
+    status = (body.get("status") or "").strip()
+    if status not in ("active", "paused", "completed", "cancelled"):
+        raise HTTPException(status_code=422, detail="Invalid status")
+    e = await db.get_nurture_enrollment(enrollment_id)
+    if not e:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+    await db.update_enrollment_status(enrollment_id, status)
+    return {"updated": True, "status": status}
+
+
+@router.post("/enrollments/{enrollment_id}/send")
+async def send_enrollment_step(enrollment_id: str):
+    """Send the current step email for this enrollment, then advance the step."""
+    e = await db.get_nurture_enrollment(enrollment_id)
+    if not e:
+        raise HTTPException(status_code=404, detail="Enrollment not found")
+    if e["status"] != "active":
+        raise HTTPException(status_code=409, detail=f"Enrollment is {e['status']}, not active")
+
+    steps = await db.get_nurture_steps(e["sequence_id"])
+    if not steps:
+        raise HTTPException(status_code=409, detail="Sequence has no steps")
+
+    step_idx = e["current_step"] - 1
+    if step_idx >= len(steps):
+        await db.update_enrollment_status(enrollment_id, "completed")
+        raise HTTPException(status_code=409, detail="All steps already sent — enrollment completed")
+
+    step = steps[step_idx]
+    deal = await db.get_deal(e["deal_id"])
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+    if not deal.get("email"):
+        raise HTTPException(status_code=422, detail="Deal has no email address")
+
+    first_name = (deal.get("name") or "").split()[0] if deal.get("name") else "there"
+    company = deal.get("company") or ""
+
+    subject = (step["subject"]
+               .replace("{{name}}", first_name)
+               .replace("{{company}}", company))
+    body = (step["body"]
+            .replace("{{name}}", first_name)
+            .replace("{{company}}", company))
+
+    result = await send_email_via_outlook(
+        to_email=deal["email"],
+        to_name=first_name,
+        from_name=settings.default_from_name or "",
+        subject=subject,
+        body=body,
+        deal_id=deal["id"],
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=502, detail=result.get("error", "Send failed"))
+
+    from app.services.database import now_iso
+    ts = now_iso()
+    next_step_num = e["current_step"] + 1
+
+    if next_step_num > len(steps):
+        await db.update_enrollment_status(enrollment_id, "completed")
+        status_out = "completed"
+    else:
+        await db.advance_enrollment(enrollment_id, ts)
+        status_out = "active"
+
+    logger.info(
+        "Nurture step %d sent to %s (enrollment %s) — status: %s",
+        e["current_step"], deal["email"], enrollment_id, status_out,
+    )
+    return {
+        "sent": True,
+        "step_sent": e["current_step"],
+        "next_step": next_step_num if status_out == "active" else None,
+        "status": status_out,
+    }
+
+
+# ── Nurture Analytics ─────────────────────────────────────────────────────────
+
+@router.get("/analytics")
+async def nurture_analytics():
+    data = await db.get_nurture_analytics()
+    return data

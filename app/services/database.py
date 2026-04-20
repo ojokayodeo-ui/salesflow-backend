@@ -641,6 +641,38 @@ CREATE TABLE IF NOT EXISTS swipe_files (
     updated_at  TEXT NOT NULL
 )"""
 
+CREATE_NURTURE_SEQUENCES = """
+CREATE TABLE IF NOT EXISTS nurture_sequences (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+)"""
+
+CREATE_NURTURE_SEQ_STEPS = """
+CREATE TABLE IF NOT EXISTS nurture_seq_steps (
+    id          TEXT PRIMARY KEY,
+    sequence_id TEXT NOT NULL,
+    step_order  INTEGER NOT NULL,
+    subject     TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL DEFAULT '',
+    delay_days  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
+)"""
+
+CREATE_NURTURE_ENROLLMENTS = """
+CREATE TABLE IF NOT EXISTS nurture_enrollments (
+    id           TEXT PRIMARY KEY,
+    sequence_id  TEXT NOT NULL,
+    deal_id      TEXT NOT NULL,
+    current_step INTEGER NOT NULL DEFAULT 1,
+    status       TEXT NOT NULL DEFAULT 'active',
+    enrolled_at  TEXT NOT NULL,
+    last_sent_at TEXT,
+    next_send_at TEXT
+)"""
+
 CREATE_EMAIL_EVENTS = """
 CREATE TABLE IF NOT EXISTS email_events (
     id          TEXT PRIMARY KEY,
@@ -663,6 +695,9 @@ async def ensure_extra_tables():
         await conn.execute(CREATE_SOCIAL_LINKS)
         await conn.execute(CREATE_SWIPE_FILES)
         await conn.execute(CREATE_EMAIL_EVENTS)
+        await conn.execute(CREATE_NURTURE_SEQUENCES)
+        await conn.execute(CREATE_NURTURE_SEQ_STEPS)
+        await conn.execute(CREATE_NURTURE_ENROLLMENTS)
     logger.info("Extra tables ready")
 
 
@@ -925,6 +960,219 @@ async def delete_swipe_file(sf_id: str):
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM swipe_files WHERE id=$1", sf_id)
+
+
+# ── Nurture Sequences ─────────────────────────────────────────────────────────
+
+def _seq_row(row) -> dict:
+    return {
+        "id": row["id"], "name": row["name"], "description": row["description"],
+        "created_at": row["created_at"], "updated_at": row["updated_at"],
+    }
+
+def _step_row(row) -> dict:
+    return {
+        "id": row["id"], "sequence_id": row["sequence_id"],
+        "step_order": row["step_order"], "subject": row["subject"],
+        "body": row["body"], "delay_days": row["delay_days"],
+        "created_at": row["created_at"],
+    }
+
+async def list_nurture_sequences() -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        seqs = await conn.fetch("SELECT * FROM nurture_sequences ORDER BY created_at DESC")
+        steps = await conn.fetch("SELECT * FROM nurture_seq_steps ORDER BY sequence_id, step_order")
+        counts = await conn.fetch(
+            "SELECT sequence_id, COUNT(*) as total, "
+            "COUNT(CASE WHEN status='active' THEN 1 END) as active "
+            "FROM nurture_enrollments GROUP BY sequence_id"
+        )
+    count_map = {r["sequence_id"]: {"enrolled": r["total"], "active": r["active"]} for r in counts}
+    step_map: dict[str, list] = {}
+    for s in steps:
+        step_map.setdefault(s["sequence_id"], []).append(_step_row(s))
+    result = []
+    for seq in seqs:
+        d = _seq_row(seq)
+        d["steps"] = step_map.get(seq["id"], [])
+        d["enrolled_count"] = count_map.get(seq["id"], {}).get("enrolled", 0)
+        d["active_count"] = count_map.get(seq["id"], {}).get("active", 0)
+        result.append(d)
+    return result
+
+async def get_nurture_sequence(seq_id: str) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM nurture_sequences WHERE id=$1", seq_id)
+        if not row:
+            return None
+        steps = await conn.fetch(
+            "SELECT * FROM nurture_seq_steps WHERE sequence_id=$1 ORDER BY step_order", seq_id
+        )
+    d = _seq_row(row)
+    d["steps"] = [_step_row(s) for s in steps]
+    return d
+
+async def create_nurture_sequence(name: str, description: str = "") -> dict:
+    sid = new_id(); ts = now_iso()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO nurture_sequences (id,name,description,created_at,updated_at) VALUES ($1,$2,$3,$4,$5)",
+            sid, name, description, ts, ts,
+        )
+    return await get_nurture_sequence(sid)
+
+async def update_nurture_sequence(seq_id: str, fields: dict) -> dict | None:
+    ts = now_iso()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE nurture_sequences SET name=$1, description=$2, updated_at=$3 WHERE id=$4",
+            fields.get("name"), fields.get("description", ""), ts, seq_id,
+        )
+    return await get_nurture_sequence(seq_id)
+
+async def delete_nurture_sequence(seq_id: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM nurture_seq_steps WHERE sequence_id=$1", seq_id)
+        await conn.execute("DELETE FROM nurture_enrollments WHERE sequence_id=$1", seq_id)
+        await conn.execute("DELETE FROM nurture_sequences WHERE id=$1", seq_id)
+
+async def get_nurture_steps(sequence_id: str) -> list[dict]:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM nurture_seq_steps WHERE sequence_id=$1 ORDER BY step_order", sequence_id
+        )
+    return [_step_row(r) for r in rows]
+
+async def add_nurture_step(sequence_id: str, step_order: int, subject: str, body: str, delay_days: int) -> dict:
+    sid = new_id(); ts = now_iso()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO nurture_seq_steps (id,sequence_id,step_order,subject,body,delay_days,created_at) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7)",
+            sid, sequence_id, step_order, subject, body, delay_days, ts,
+        )
+        row = await conn.fetchrow("SELECT * FROM nurture_seq_steps WHERE id=$1", sid)
+    return _step_row(row)
+
+async def update_nurture_step(step_id: str, fields: dict) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE nurture_seq_steps SET subject=$1, body=$2, delay_days=$3, step_order=$4 WHERE id=$5",
+            fields.get("subject"), fields.get("body"), fields.get("delay_days", 0),
+            fields.get("step_order", 1), step_id,
+        )
+        row = await conn.fetchrow("SELECT * FROM nurture_seq_steps WHERE id=$1", step_id)
+    return _step_row(row) if row else None
+
+async def delete_nurture_step(step_id: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM nurture_seq_steps WHERE id=$1", step_id)
+
+async def list_nurture_enrollments(status: str | None = None) -> list[dict]:
+    pool = await get_pool()
+    sql = (
+        "SELECT ne.*, d.name as deal_name, d.email as deal_email, "
+        "d.company as deal_company, ns.name as sequence_name "
+        "FROM nurture_enrollments ne "
+        "LEFT JOIN deals d ON d.id=ne.deal_id "
+        "LEFT JOIN nurture_sequences ns ON ns.id=ne.sequence_id "
+    )
+    args = []
+    if status:
+        sql += " WHERE ne.status=$1"
+        args.append(status)
+    sql += " ORDER BY ne.enrolled_at DESC"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *args)
+    return [dict(r) for r in rows]
+
+async def get_nurture_enrollment(enrollment_id: str) -> dict | None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT ne.*, d.name as deal_name, d.email as deal_email, "
+            "d.company as deal_company, ns.name as sequence_name "
+            "FROM nurture_enrollments ne "
+            "LEFT JOIN deals d ON d.id=ne.deal_id "
+            "LEFT JOIN nurture_sequences ns ON ns.id=ne.sequence_id "
+            "WHERE ne.id=$1",
+            enrollment_id,
+        )
+    return dict(row) if row else None
+
+async def create_nurture_enrollment(sequence_id: str, deal_id: str) -> dict:
+    eid = new_id(); ts = now_iso()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO nurture_enrollments "
+            "(id,sequence_id,deal_id,current_step,status,enrolled_at) VALUES ($1,$2,$3,$4,$5,$6)",
+            eid, sequence_id, deal_id, 1, "active", ts,
+        )
+    return await get_nurture_enrollment(eid)
+
+async def update_enrollment_status(enrollment_id: str, status: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE nurture_enrollments SET status=$1 WHERE id=$2", status, enrollment_id
+        )
+
+async def advance_enrollment(enrollment_id: str, last_sent_at: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE nurture_enrollments SET current_step=current_step+1, last_sent_at=$1 WHERE id=$2",
+            last_sent_at, enrollment_id,
+        )
+
+async def delete_nurture_enrollment(enrollment_id: str):
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM nurture_enrollments WHERE id=$1", enrollment_id)
+
+async def get_nurture_analytics() -> dict:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM nurture_enrollments")
+        status_rows = await conn.fetch(
+            "SELECT status, COUNT(*) as cnt FROM nurture_enrollments GROUP BY status"
+        )
+        email_row = await conn.fetchrow(
+            "SELECT COUNT(*) as sent, COALESCE(SUM(open_count),0) as total_opens, "
+            "COUNT(CASE WHEN opened_at IS NOT NULL THEN 1 END) as unique_opens "
+            "FROM email_events"
+        )
+        per_seq = await conn.fetch(
+            "SELECT ne.sequence_id, ns.name, COUNT(*) as enrolled, "
+            "COUNT(CASE WHEN ne.status='active' THEN 1 END) as active, "
+            "COUNT(CASE WHEN ne.status='completed' THEN 1 END) as completed, "
+            "COUNT(CASE WHEN ne.status='paused' THEN 1 END) as paused "
+            "FROM nurture_enrollments ne "
+            "LEFT JOIN nurture_sequences ns ON ns.id=ne.sequence_id "
+            "GROUP BY ne.sequence_id, ns.name ORDER BY enrolled DESC"
+        )
+    status_map = {r["status"]: r["cnt"] for r in status_rows}
+    return {
+        "total_enrolled": total or 0,
+        "active": status_map.get("active", 0),
+        "paused": status_map.get("paused", 0),
+        "completed": status_map.get("completed", 0),
+        "cancelled": status_map.get("cancelled", 0),
+        "emails_sent": email_row["sent"] if email_row else 0,
+        "total_opens": email_row["total_opens"] if email_row else 0,
+        "unique_opens": email_row["unique_opens"] if email_row else 0,
+        "per_sequence": [dict(r) for r in per_seq],
+    }
 
 
 # ── Email Events (tracking) ──────────────────────────────────────────────────
