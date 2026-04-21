@@ -57,7 +57,7 @@ Rules:
 - WARM: Polite but non-committal, asks for more details without clear intent, general interest
 - COLD: Unsubscribe, not interested, auto-reply, out of office, negative
 
-Return ONLY valid JSON, no markdown:
+Return ONLY valid JSON, no markdown. Never use em dashes (—):
 {{"score": "hot|warm|cold", "reason": "One sentence explaining why", "emoji": "🔥|☀️|❄️"}}"""
 
     try:

@@ -146,7 +146,8 @@ IMPORTANT INSTRUCTIONS:
 
 {prospect_context}
 
-Return ONLY valid JSON — no markdown, no explanation, no fences. Use this exact structure:
+Return ONLY valid JSON - no markdown, no explanation, no fences. Use this exact structure:
+IMPORTANT: Never use em dashes (—) in any text values. Use a regular hyphen (-) or rewrite the sentence instead.
 
 {{
   "segments": [

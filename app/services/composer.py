@@ -22,14 +22,14 @@ As promised — here are your 100 targeted leads.
 
 I've built this list specifically around companies that match your profile: {icp.sub_niche} firms with {icp.company_size}, based in {icp.hq_country}.
 
-Every contact has been filtered for the decision-maker titles most likely to say yes to what you do — {titles}.
+Every contact has been filtered for the decision-maker titles most likely to say yes to what you do: {titles}.
 
 The CSV is attached. A few things worth knowing:
 - All emails are verified
 - Sorted by growth signal (highest intent first)
 - Includes company name and city for quick prioritisation
 
-Let me know if you'd like a tighter niche, a different geography, or more senior contacts — I can turn a revised list around quickly.
+Let me know if you'd like a tighter niche, a different geography, or more senior contacts. I can turn a revised list around quickly.
 
 Looking forward to getting you booked meetings.
 
@@ -79,7 +79,8 @@ Write a warm, professional email body (no subject line). 3–4 short paragraphs.
 - Explain that the list was built around their ICP (briefly)
 - Give 2–3 bullet points about what's in the CSV
 - End with a soft next step (not pushy)
-Tone: direct, peer-to-peer, no corporate fluff."""
+Tone: direct, peer-to-peer, no corporate fluff.
+IMPORTANT: Never use em dashes (—). Use a regular hyphen (-) or rewrite the sentence instead."""
 
     headers = {
         "x-api-key":         settings.anthropic_api_key,

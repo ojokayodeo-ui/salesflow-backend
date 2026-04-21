@@ -650,9 +650,9 @@ async def draft_email_quick(body: dict):
 
 As promised, please find your targeted lead list attached — {lead_count} verified contacts matched specifically to {company}'s ideal client profile.
 
-Each contact has been filtered for {industry} firms most likely to need your services right now{(' — particularly those facing ' + pain_point.lower()) if pain_point else ''}.
+Each contact has been filtered for {industry} firms most likely to need your services right now{(', particularly those facing ' + pain_point.lower()) if pain_point else ''}.
 
-To get the most from this list, I'd recommend prioritising the first 20–30 contacts and reaching out within the next 48 hours while the list is fresh.
+To get the most from this list, I'd recommend prioritising the first 20-30 contacts and reaching out within the next 48 hours while the list is fresh.
 
 If you'd like to jump on a quick call to walk through how to work these leads most effectively, you can grab a slot here:
 {calendly or '[your-calendly-link]'}
@@ -682,7 +682,7 @@ They replied positively to a cold email and are now receiving a targeted list of
 {f"Their main pain point: {pain_point}" if pain_point else ""}
 {f"Include this Calendly link naturally: {calendly}" if calendly else ""}
 
-Write a warm, professional email delivering the lead list. 3 short paragraphs. No subject line. No placeholder text. Sign off as {sender_name}. Make it feel personal and excited about their results.{(chr(10) + chr(10) + "Also incorporate this personal note from the sender: " + custom_note) if custom_note else ""}"""
+Write a warm, professional email delivering the lead list. 3 short paragraphs. No subject line. No placeholder text. Sign off as {sender_name}. Make it feel personal and excited about their results. Never use em dashes (—) - use a regular hyphen (-) or rewrite the sentence instead.{(chr(10) + chr(10) + "Also incorporate this personal note from the sender: " + custom_note) if custom_note else ""}"""
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
