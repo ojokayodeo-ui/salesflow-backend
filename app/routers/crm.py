@@ -574,6 +574,52 @@ async def _send_leads_to_prospect_bg(
         logger.error("Failed to send leads to %s: %s", deal["email"], result.get("error"))
 
 
+@router.post("/deals/{deal_id}/schedule-followups")
+async def schedule_followup_emails(deal_id: str, body: dict):
+    """
+    Schedule follow-up emails composed in the Send Leads modal.
+    Body: { "steps": [{"subject": "...", "body": "...", "delay": 3}, ...] }
+    Delays are in days from now; emails are scheduled on business days at 09:00 Europe/London.
+    """
+    from app.services.scheduler import calculate_send_at
+    from app.services.database import schedule_email
+    import pytz
+    from datetime import datetime
+
+    deal = await db.get_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+
+    steps     = body.get("steps", [])
+    tz_str    = body.get("timezone", "Europe/London")
+    send_time = body.get("send_time", "09:00")
+    allowed   = body.get("allowed_days", ["mon","tue","wed","thu","fri"])
+
+    now_utc = datetime.now(pytz.UTC)
+    scheduled = []
+
+    for i, step in enumerate(steps):
+        subject = (step.get("subject") or "").strip()
+        body_txt = (step.get("body") or "").strip()
+        if not subject or not body_txt:
+            continue
+        delay = max(1, int(step.get("delay") or 3))
+        send_at = calculate_send_at(now_utc, delay, send_time, tz_str, allowed)
+        email_id = await schedule_email(
+            deal_id     = deal_id,
+            seq_id      = "followup",
+            step_index  = i,
+            subject     = subject,
+            body        = body_txt,
+            send_at_utc = send_at.isoformat(),
+            timezone    = tz_str,
+        )
+        scheduled.append({"step": i+1, "subject": subject, "send_at": send_at.isoformat(), "id": email_id})
+
+    logger.info("Scheduled %d follow-up email(s) for deal %s", len(scheduled), deal_id)
+    return {"scheduled": scheduled, "count": len(scheduled)}
+
+
 @router.post("/draft-email-quick")
 async def draft_email_quick(body: dict):
     """
