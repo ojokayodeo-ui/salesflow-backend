@@ -578,13 +578,14 @@ async def _send_leads_to_prospect_bg(
 async def schedule_followup_emails(deal_id: str, body: dict):
     """
     Schedule follow-up emails composed in the Send Leads modal.
-    Body: { "steps": [{"subject": "...", "body": "...", "delay": 3}, ...] }
-    Delays are in days from now; emails are scheduled on business days at 09:00 Europe/London.
+    Body: { "steps": [{"subject": "...", "body": "...", "delay_seconds": 86400}, ...] }
+    delay_seconds >= 86400 (1 day) uses business-day-aware scheduling at 09:00.
+    delay_seconds < 86400 schedules the exact timedelta from now (seconds precision).
     """
     from app.services.scheduler import calculate_send_at
     from app.services.database import schedule_email
+    from datetime import datetime, timedelta
     import pytz
-    from datetime import datetime
 
     deal = await db.get_deal(deal_id)
     if not deal:
@@ -603,8 +604,20 @@ async def schedule_followup_emails(deal_id: str, body: dict):
         body_txt = (step.get("body") or "").strip()
         if not subject or not body_txt:
             continue
-        delay = max(1, int(step.get("delay") or 3))
-        send_at = calculate_send_at(now_utc, delay, send_time, tz_str, allowed)
+
+        delay_seconds = int(step.get("delay_seconds") or 0)
+        if delay_seconds <= 0:
+            # Legacy: fall back to delay in days
+            delay_seconds = max(1, int(step.get("delay") or 3)) * 86400
+
+        if delay_seconds < 86400:
+            # Sub-day precision: schedule exactly delay_seconds from now
+            send_at = now_utc + timedelta(seconds=delay_seconds)
+        else:
+            # Day+ delay: use business-day-aware scheduling
+            delay_days = delay_seconds // 86400
+            send_at = calculate_send_at(now_utc, delay_days, send_time, tz_str, allowed)
+
         email_id = await schedule_email(
             deal_id     = deal_id,
             seq_id      = "followup",
