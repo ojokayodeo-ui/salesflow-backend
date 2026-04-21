@@ -46,6 +46,30 @@ async def get_lead_by_email(email: str) -> dict:
                 return data[key]
         return []
 
+    # ── Attempt 0: GET /leads/{email} — direct lookup by email ──────────────
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{INSTANTLY_API_BASE}/leads/{email}",
+                headers=auth_headers,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                # Direct lookup returns the lead object directly (not a list)
+                if isinstance(data, dict) and (data.get("email") or data.get("first_name") or data.get("company_name")):
+                    logger.info("Instantly lead found (GET /leads/{email}): %s at %s",
+                                data.get("first_name",""), data.get("company_name",""))
+                    return data
+                # Might return wrapped in items
+                items = _parse_items(data)
+                lead = _find_in_items(items)
+                if lead:
+                    return lead
+    except httpx.HTTPStatusError as exc:
+        logger.info("GET /leads/{email} → %s for %s", exc.response.status_code, email)
+    except Exception as exc:
+        logger.info("GET /leads/{email} failed for %s: %s", email, exc)
+
     # ── Attempt 1: GET /leads?email=xxx ─────────────────────────────────────
     try:
         async with httpx.AsyncClient(timeout=15) as client:
@@ -68,11 +92,12 @@ async def get_lead_by_email(email: str) -> dict:
     except Exception as exc:
         logger.info("GET /leads?email failed for %s: %s", email, exc)
 
-    # ── Attempts 2–4: POST /leads/list with various filter formats ───────────
+    # ── Attempts 2–5: POST /leads/list with various filter formats ───────────
     post_bodies = [
         {"email": email, "limit": 25},
         {"search": email, "limit": 25},
         {"filter": email, "limit": 25},
+        {"filter": {"email": {"eq": email}}, "limit": 25},
     ]
 
     for body in post_bodies:
