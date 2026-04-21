@@ -5,6 +5,7 @@ Requires Mail.Read application permission in Azure AD.
 
 import asyncio
 import logging
+import time
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
@@ -14,6 +15,18 @@ from app.config import settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# ── Simple TTL cache ──────────────────────────────────────────────────────────
+_cache: dict = {}  # key → (value, expires_at)
+
+def _cache_get(key: str):
+    entry = _cache.get(key)
+    if entry and entry[1] > time.monotonic():
+        return entry[0]
+    return None
+
+def _cache_set(key: str, value, ttl: int):
+    _cache[key] = (value, time.monotonic() + ttl)
 
 PERMISSION_HINT = (
     "Mail.Read permission required. In Azure Portal → App registrations → "
@@ -206,12 +219,18 @@ async def mail_for_deal(email: str = Query(...), top: int = Query(20, le=50)):
 # ── Inbox Sync — match inbox senders to deal cards ───────────────────────────
 
 @router.get("/inbox-sync")
-async def inbox_sync(top: int = Query(100, le=200)):
+async def inbox_sync(top: int = Query(50, le=100)):
     """
     Fetch recent inbox messages and group by sender email.
     Frontend uses this to highlight deal cards that have unread replies.
     Returns: {by_email: {email: {count, unread, latest_subject, latest_date}}}
+    Cached for 90 seconds to reduce Graph API load.
     """
+    cache_key = f"inbox_sync_{settings.ms_sender_email}_{top}"
+    cached = _cache_get(cache_key)
+    if cached:
+        return cached
+
     if not settings.ms_sender_email:
         raise HTTPException(status_code=503, detail="MS_SENDER_EMAIL not configured")
     try:
@@ -249,11 +268,13 @@ async def inbox_sync(top: int = Query(100, le=200)):
             if not m.get("isRead"):
                 by_email[addr]["unread"] += 1
 
-        return {
+        result = {
             "by_email": by_email,
             "total_fetched": len(messages),
             "mailbox": settings.ms_sender_email,
         }
+        _cache_set(cache_key, result, ttl=90)
+        return result
 
     except HTTPException:
         raise
@@ -276,18 +297,37 @@ async def deal_metrics(deal_id: str):
 
 
 @router.get("/metrics-bulk")
-async def deal_metrics_bulk(deal_ids: str = Query(...)):
+async def deal_metrics_bulk_get(deal_ids: str = Query(...)):
+    """Legacy GET form — delegates to POST handler."""
+    ids = [d.strip() for d in deal_ids.split(",") if d.strip()]
+    return await _metrics_bulk(ids)
+
+@router.post("/metrics-bulk")
+async def deal_metrics_bulk(body: dict):
     """
     Return metrics for multiple deals at once.
-    deal_ids: comma-separated deal IDs.
+    Body: { "deal_ids": ["id1", "id2", ...] }
+    Cached per deal for 60 seconds.
     """
-    ids = [d.strip() for d in deal_ids.split(",") if d.strip()]
+    ids = body.get("deal_ids") or []
+    if isinstance(ids, str):
+        ids = [d.strip() for d in ids.split(",") if d.strip()]
+    return await _metrics_bulk(ids)
+
+async def _metrics_bulk(ids: list) -> dict:
     if not ids:
         return {"metrics": {}}
     results = {}
-    for did in ids[:50]:
+    for did in ids[:60]:
+        cache_key = f"metrics_{did}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            results[did] = cached
+            continue
         try:
-            results[did] = await db.get_email_metrics(did)
+            m = await db.get_email_metrics(did)
+            _cache_set(cache_key, m, ttl=60)
+            results[did] = m
         except Exception:
             results[did] = {}
     return {"metrics": results}

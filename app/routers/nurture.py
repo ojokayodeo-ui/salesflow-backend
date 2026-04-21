@@ -329,6 +329,7 @@ async def compose_nurture_email(body: dict):
         "- Body: 3-5 short paragraphs, conversational, ends with a soft CTA",
         "- Do NOT use salesy buzzwords (synergy, leverage, game-changer, etc.)",
         "- Personalise using the lead context where relevant",
+        "- Never use em dashes (—). Use a regular hyphen (-), a comma, or rewrite the sentence instead.",
         "",
         'Return ONLY valid JSON in this exact format (no markdown, no extra text):',
         '{"subject": "...", "body": "..."}',
