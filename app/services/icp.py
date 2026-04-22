@@ -33,7 +33,7 @@ async def scrape_website(url: str) -> str:
             text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.DOTALL)
             text = re.sub(r"<[^>]+>", " ", text)
             text = re.sub(r"\s+", " ", text).strip()
-            return text[:3000]
+            return text[:5000]
     except Exception as exc:
         logger.warning("Website scrape failed for %s: %s", url, exc)
         return ""
@@ -113,36 +113,49 @@ REPLY TEXT:
 === END OF REPLY ===
 """
 
+    # Build rich Instantly data block — include every non-empty field
+    instantly_fields = []
+    if prospect.name:        instantly_fields.append(f"  Name: {prospect.name}")
+    if prospect.job_title:   instantly_fields.append(f"  Job title: {prospect.job_title}")
+    if prospect.job_level:   instantly_fields.append(f"  Seniority: {prospect.job_level}")
+    if prospect.department:  instantly_fields.append(f"  Department: {prospect.department}")
+    if prospect.company:     instantly_fields.append(f"  Company: {prospect.company}")
+    if prospect.website or prospect.domain:
+        instantly_fields.append(f"  Website: {prospect.website or prospect.domain}")
+    if prospect.linkedin:    instantly_fields.append(f"  LinkedIn: {prospect.linkedin}")
+    if prospect.location:    instantly_fields.append(f"  Location: {prospect.location}")
+    if prospect.headcount:   instantly_fields.append(f"  Company size: {prospect.headcount} employees")
+    if prospect.industry:    instantly_fields.append(f"  Industry: {prospect.industry}")
+    if prospect.sub_industry:instantly_fields.append(f"  Sub-industry: {prospect.sub_industry}")
+    if prospect.headline:    instantly_fields.append(f"  Headline/bio: {prospect.headline}")
+    if prospect.description: instantly_fields.append(f"  Company description: {prospect.description[:800]}")
+
+    instantly_block = "\n".join(instantly_fields) if instantly_fields else "  (no Instantly data available)"
+
     prospect_context = f"""
 {reply_signals}
-PROSPECT DETAILS (from Instantly.ai):
-- Name: {prospect.name}
-- Job Title: {prospect.job_title or 'Unknown'}
-- Company: {prospect.company}
-- Website: {prospect.website or prospect.domain or 'Unknown'}
-- Location: {prospect.location or 'Unknown'}
-- Company Size: {prospect.headcount or 'Unknown'}
-- Industry: {prospect.industry or 'Unknown'}
-- Sub-industry: {prospect.sub_industry or 'Unknown'}
-- Description: {prospect.description[:500] if prospect.description else 'Not provided'}
-- Headline: {prospect.headline or 'Not provided'}
+=== INSTANTLY.AI LEAD DATA (real enriched data — use every field) ===
+{instantly_block}
+=== END INSTANTLY DATA ===
 
-WEBSITE CONTENT:
-{website_content if website_content else 'Could not scrape — rely on the reply and description above.'}
+=== WEBSITE CONTENT (live scraped) ===
+{website_content if website_content else 'Could not scrape. Use the Instantly data and reply above.'}
+=== END WEBSITE CONTENT ===
 {apify_block}
 """.strip()
 
-    prompt = f"""You are a world-class B2B market segmentation expert specialising in outbound sales strategy.
+    prompt = f"""You are a world-class B2B market segmentation expert. Your job is to generate 5 sharp, specific, actionable ICP segments for this prospect's outbound sales.
 
-Your task: Analyse the prospect below and identify the 5 best distinct audience segments they should be targeting with their outbound prospecting.
-
-IMPORTANT INSTRUCTIONS:
-1. START with the prospect's reply — this is the PRIMARY signal.
-2. Use the EXTERNAL MARKET INTELLIGENCE (Apify) section if present — it contains real Google search data about who the prospect serves and what their sector cares about right now. Use this to validate and sharpen your segments.
-3. Use website content and company description to fill remaining gaps.
-4. Make each segment MEANINGFULLY DIFFERENT — different industries, job titles, company sizes, or pain points.
-5. Be specific — "NHS Procurement Directors at acute trusts" beats "healthcare companies".
-6. Ground pain points and buying signals in the real market data from the Apify section when available.
+CRITICAL RULES:
+1. Use ONLY the real data provided below. Do not invent industries, company types, or pain points not evidenced in the data.
+2. The prospect's reply is the PRIMARY signal - extract every specific detail from it (sector names, client types, problems mentioned, locations).
+3. The Instantly.ai data contains real enriched profile data - the company description and headline are particularly valuable. Use them directly.
+4. The website content shows exactly what services they offer and who they serve. Mine it for specific client types and use cases.
+5. Apify market intelligence (if present) contains real Google search data - use it to validate and sharpen pain points.
+6. Each segment must be MEANINGFULLY DIFFERENT - different industry, buyer type, company size, or pain point.
+7. Be hyper-specific: "Ecommerce founders running $1M-$10M Shopify brands" beats "online retailers".
+8. Never use em dashes (—). Use a regular hyphen (-) or rewrite the sentence.
+9. If a field has no real data to support it, use the closest evidenced inference and note it in reply_signal.
 
 {prospect_context}
 
@@ -182,8 +195,8 @@ IMPORTANT: Never use em dashes (—) in any text values. Use a regular hyphen (-
         "Content-Type":      "application/json",
     }
     payload = {
-        "model":      "claude-sonnet-4-20250514",
-        "max_tokens": 3000,
+        "model":      "claude-sonnet-4-6",
+        "max_tokens": 4096,
         "messages":   [{"role": "user", "content": prompt}],
     }
 
