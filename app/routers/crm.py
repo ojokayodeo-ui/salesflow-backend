@@ -530,23 +530,25 @@ async def send_leads_to_prospect(deal_id: str, background_tasks: BackgroundTasks
     if not deal:
         raise HTTPException(status_code=404, detail="Deal not found")
 
-    subject  = body.get("subject", f"Your leads — {deal.get('company','')}")
-    body_txt = body.get("body", "")
-    filename = body.get("filename", "leads.csv")
+    subject     = body.get("subject", f"Your leads — {deal.get('company','')}")
+    body_txt    = body.get("body", "")
+    filename    = body.get("filename", "leads.csv")
+    attachments = body.get("attachments") or []
 
     if not body_txt.strip():
         raise HTTPException(status_code=400, detail="Email body is empty")
 
     background_tasks.add_task(
         _send_leads_to_prospect_bg,
-        deal_id, deal, subject, body_txt, filename
+        deal_id, deal, subject, body_txt, filename, attachments
     )
     return {"queued": True, "deal_id": deal_id, "to": deal["email"]}
 
 
 async def _send_leads_to_prospect_bg(
     deal_id: str, deal: dict,
-    subject: str, body_txt: str, filename: str
+    subject: str, body_txt: str, filename: str,
+    extra_attachments: list | None = None,
 ):
     from app.services.outlook import send_email_via_outlook
     from app.services.apollo import leads_to_csv
@@ -557,14 +559,15 @@ async def _send_leads_to_prospect_bg(
     csv_data = leads_to_csv(leads) if leads else None
 
     result = await send_email_via_outlook(
-        to_email     = deal["email"],
-        to_name      = deal["name"],
-        from_name    = settings.default_from_name or "Kayode",
-        subject      = subject,
-        body         = body_txt,
-        csv_data     = csv_data,
-        csv_filename = filename,
-        deal_id      = deal_id,
+        to_email          = deal["email"],
+        to_name           = deal["name"],
+        from_name         = settings.default_from_name or "Kayode",
+        subject           = subject,
+        body              = body_txt,
+        csv_data          = csv_data,
+        csv_filename      = filename,
+        deal_id           = deal_id,
+        extra_attachments = extra_attachments or [],
     )
 
     if result.get("success"):
@@ -618,6 +621,8 @@ async def schedule_followup_emails(deal_id: str, body: dict):
             delay_days = delay_seconds // 86400
             send_at = calculate_send_at(now_utc, delay_days, send_time, tz_str, allowed)
 
+        step_attachments = step.get("attachments") or []
+        attachments_json = __import__("json").dumps(step_attachments) if step_attachments else None
         email_id = await schedule_email(
             deal_id     = deal_id,
             seq_id      = "followup",
@@ -626,6 +631,7 @@ async def schedule_followup_emails(deal_id: str, body: dict):
             body        = body_txt,
             send_at_utc = send_at.isoformat(),
             timezone    = tz_str,
+            attachments = attachments_json,
         )
         scheduled.append({"step": i+1, "subject": subject, "send_at": send_at.isoformat(), "id": email_id})
 

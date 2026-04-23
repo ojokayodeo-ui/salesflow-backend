@@ -59,10 +59,12 @@ def _build_message(
     csv_data:    str | None = None,
     csv_filename: str = "leads_100.csv",
     tracking_pixel_url: str | None = None,
+    extra_attachments: list[dict] | None = None,
 ) -> dict:
     """
     Construct the Graph API sendMail message object.
     Attaches the CSV as a base64 file attachment when csv_data is provided.
+    extra_attachments: list of {"name": str, "content_type": str, "content_bytes": str (base64)}
     Always sends as HTML so tracking pixel works.
     """
     html_body = _text_to_html(body, tracking_pixel_url)
@@ -89,18 +91,26 @@ def _build_message(
         ],
     }
 
+    attachments = []
     if csv_data:
-        # csv_data should be plain text (the CSV string).
-        # Graph API expects base64-encoded content bytes.
         encoded = base64.b64encode(csv_data.encode("utf-8")).decode("utf-8")
-        message["attachments"] = [
-            {
-                "@odata.type":  "#microsoft.graph.fileAttachment",
-                "name":          csv_filename,
-                "contentType":   "text/csv",
-                "contentBytes":  encoded,
-            }
-        ]
+        attachments.append({
+            "@odata.type":  "#microsoft.graph.fileAttachment",
+            "name":          csv_filename,
+            "contentType":   "text/csv",
+            "contentBytes":  encoded,
+        })
+
+    for att in (extra_attachments or []):
+        attachments.append({
+            "@odata.type":  "#microsoft.graph.fileAttachment",
+            "name":          att.get("name", "attachment"),
+            "contentType":   att.get("content_type", "application/octet-stream"),
+            "contentBytes":  att.get("content_bytes", ""),
+        })
+
+    if attachments:
+        message["attachments"] = attachments
 
     return message
 
@@ -146,6 +156,7 @@ async def send_email_via_outlook(
     csv_data:    str | None = None,
     csv_filename: str = "leads_100.csv",
     deal_id:     str | None = None,
+    extra_attachments: list[dict] | None = None,
 ) -> dict:
     """
     Send an email through Microsoft Graph on behalf of the configured
@@ -171,6 +182,7 @@ async def send_email_via_outlook(
             csv_data=csv_data,
             csv_filename=csv_filename,
             tracking_pixel_url=tracking_pixel_url,
+            extra_attachments=extra_attachments,
         )
 
         # POST /users/{sender}/sendMail

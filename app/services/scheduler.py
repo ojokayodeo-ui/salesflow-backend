@@ -89,14 +89,23 @@ async def process_due_emails():
             continue
 
         try:
+            import json as _json
+            extra_attachments = []
+            if email.get("attachments"):
+                try:
+                    extra_attachments = _json.loads(email["attachments"])
+                except Exception:
+                    pass
+
             result = await send_email_via_outlook(
-                to_email  = deal["email"],
-                to_name   = deal["name"].split(" ")[0],
-                from_name = settings.default_from_name,
-                subject   = email["step_subject"],
-                body      = email["step_body"],
-                csv_data  = None,
-                csv_filename = "",
+                to_email          = deal["email"],
+                to_name           = deal["name"].split(" ")[0],
+                from_name         = settings.default_from_name,
+                subject           = email["step_subject"],
+                body              = email["step_body"],
+                csv_data          = None,
+                csv_filename      = "",
+                extra_attachments = extra_attachments,
             )
 
             if result["success"]:

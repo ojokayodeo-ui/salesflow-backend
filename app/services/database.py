@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS scheduled_emails (
     status       TEXT NOT NULL DEFAULT 'pending',
     sent_at      TEXT,
     error        TEXT,
+    attachments  TEXT,
     created_at   TEXT NOT NULL
 )
 """
@@ -178,6 +179,11 @@ async def init_db():
         # Add raw_json to leads table (preserves all original CSV columns)
         try:
             await conn.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS raw_json TEXT")
+        except Exception:
+            pass
+        # Add attachments to scheduled_emails (base64-encoded file attachments)
+        try:
+            await conn.execute("ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS attachments TEXT")
         except Exception:
             pass
     logger.info("PostgreSQL database ready")
@@ -532,6 +538,7 @@ async def schedule_email(
     deal_id: str, seq_id: str, step_index: int,
     subject: str, body: str, send_at_utc: str,
     timezone: str = "Europe/London",
+    attachments: str | None = None,
 ) -> str:
     email_id = new_id()
     pool = await get_pool()
@@ -539,10 +546,10 @@ async def schedule_email(
         await conn.execute(
             """INSERT INTO scheduled_emails
                (id,deal_id,seq_id,step_index,step_subject,step_body,
-                send_at,timezone,status,created_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+                send_at,timezone,status,attachments,created_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)""",
             email_id, deal_id, seq_id, step_index, subject, body,
-            send_at_utc, timezone, "pending", now_iso(),
+            send_at_utc, timezone, "pending", attachments, now_iso(),
         )
     logger.info("Scheduled email %s for deal %s at %s", email_id, deal_id, send_at_utc)
     return email_id
