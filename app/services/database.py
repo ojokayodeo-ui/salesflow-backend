@@ -1217,7 +1217,35 @@ async def record_email_open(token: str) -> bool:
     return True
 
 
-async def get_email_metrics(deal_id: str) -> dict:
+async def get_all_open_rates() -> dict:
+    """
+    Return every tracked sent email joined with deal name/company,
+    sorted by sent_at descending. Used for the open-rates summary view.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT e.deal_id, e.subject, e.sent_at, e.opened_at, e.open_count,
+                   d.name, d.company, d.email
+            FROM email_events e
+            LEFT JOIN deals d ON d.id = e.deal_id
+            WHERE e.direction = 'sent'
+            ORDER BY e.sent_at DESC
+            """
+        )
+    events = [dict(r) for r in rows]
+    total_sent   = len(events)
+    unique_opens = sum(1 for e in events if (e.get("open_count") or 0) > 0)
+    return {
+        "rows": events,
+        "summary": {
+            "total_sent":   total_sent,
+            "unique_opens": unique_opens,
+            "open_rate":    round(unique_opens / total_sent * 100) if total_sent else 0,
+        },
+    }
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(

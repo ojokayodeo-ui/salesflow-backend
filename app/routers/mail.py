@@ -289,6 +289,15 @@ async def inbox_sync(top: int = Query(50, le=100)):
 
 # ── Deal Email Metrics ────────────────────────────────────────────────────────
 
+@router.get("/open-rates")
+async def open_rates():
+    """
+    Return all tracked sent emails with open counts, joined with deal name/company.
+    Used for the Open Rates summary tab in the Mail section.
+    """
+    return await db.get_all_open_rates()
+
+
 @router.get("/metrics/{deal_id}")
 async def deal_metrics(deal_id: str):
     """Return tracked email send/open metrics for a deal."""
