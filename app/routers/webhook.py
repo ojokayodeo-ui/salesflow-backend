@@ -294,6 +294,22 @@ View deal: {_os.environ.get("APP_URL", "https://pipeline-activation-leadmagnet.n
     await db.finish_pipeline_run(run_id, status="complete")
     logger.info("=== Pipeline complete for %s ===", prospect.company)
 
+    # Stage 4 — Auto-build: Apollo search + delivery email draft + follow-up sequence
+    # Runs in background so the webhook returns quickly. Does NOT auto-send.
+    # Results are stored on the deal (pipeline_status, followup_draft, leads).
+    # The user reviews and sends via the frontend Send Leads modal.
+    refreshed_deal = await db.get_deal(deal_id)
+    if refreshed_deal:
+        try:
+            from app.services.auto_pipeline import run_auto_pipeline
+            import asyncio as _asyncio
+            _asyncio.create_task(
+                run_auto_pipeline(deal_id, refreshed_deal, auto_send=False)
+            )
+            logger.info("Auto-pipeline build queued for %s", prospect.company)
+        except Exception as exc:
+            logger.warning("Auto-pipeline queue failed (non-critical): %s", exc)
+
 
 @router.get("/debug-enrich/{email}")
 async def debug_enrich(email: str):

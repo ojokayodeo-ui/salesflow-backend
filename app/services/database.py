@@ -186,6 +186,12 @@ async def init_db():
             await conn.execute("ALTER TABLE scheduled_emails ADD COLUMN IF NOT EXISTS attachments TEXT")
         except Exception:
             pass
+        # Add pipeline automation columns to deals
+        for col in ("pipeline_status TEXT", "followup_draft TEXT"):
+            try:
+                await conn.execute(f"ALTER TABLE deals ADD COLUMN IF NOT EXISTS {col}")
+            except Exception:
+                pass
     logger.info("PostgreSQL database ready")
 
 
