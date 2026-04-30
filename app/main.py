@@ -3,7 +3,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import email, webhook, pipeline, crm, calendly, analytics, nurture, mail, agent
+from app.routers import email, webhook, pipeline, crm, calendly, analytics, nurture, mail, agent, agents
 from app.services.database import init_db, ensure_extra_tables
 from app.services.scheduler import run_scheduler
 
@@ -45,6 +45,7 @@ app.include_router(analytics.router, prefix="/api/analytics", tags=["Analytics"]
 app.include_router(nurture.router,   prefix="/api/nurture",   tags=["Nurture"])
 app.include_router(mail.router,      prefix="/api/mail",      tags=["Mail"])
 app.include_router(agent.router,     prefix="/api/agent",     tags=["Agent"])
+app.include_router(agents.router,    prefix="/api/agents",    tags=["Agents"])
 
 
 @app.get("/")

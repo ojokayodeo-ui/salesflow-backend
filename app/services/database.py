@@ -196,6 +196,36 @@ async def init_db():
     logger.info("PostgreSQL database ready")
 
 
+# ── Pipeline step helper (used by agents router) ─────────────────────────────
+
+async def _set_pipeline_step(deal_id: str, step: str, status: str, detail: str = ""):
+    """Update a single step inside the pipeline_status JSON column."""
+    from datetime import datetime, timezone as _tz
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT pipeline_status FROM deals WHERE id=$1", deal_id)
+            if not row:
+                return
+            current: dict = {}
+            if row["pipeline_status"]:
+                try:
+                    current = json.loads(row["pipeline_status"])
+                except Exception:
+                    pass
+            current[step] = {
+                "status": status,
+                "detail": detail,
+                "ts":     datetime.now(_tz.utc).isoformat(),
+            }
+            await conn.execute(
+                "UPDATE deals SET pipeline_status=$1 WHERE id=$2",
+                json.dumps(current), deal_id,
+            )
+    except Exception as exc:
+        logger.warning("_set_pipeline_step failed for deal %s step %s: %s", deal_id, step, exc)
+
+
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 def _deal_row(row) -> dict:
