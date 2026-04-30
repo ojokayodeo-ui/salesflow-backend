@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS deals (
     sentiment       TEXT DEFAULT 'warm',
     sentiment_reason TEXT,
     sentiment_emoji TEXT DEFAULT '☀️',
-    last_activity   TEXT
+    last_activity   TEXT,
+    website_intel   TEXT
 )
 """
 
@@ -187,7 +188,7 @@ async def init_db():
         except Exception:
             pass
         # Add pipeline automation columns to deals
-        for col in ("pipeline_status TEXT", "followup_draft TEXT"):
+        for col in ("pipeline_status TEXT", "followup_draft TEXT", "website_intel TEXT"):
             try:
                 await conn.execute(f"ALTER TABLE deals ADD COLUMN IF NOT EXISTS {col}")
             except Exception:
@@ -200,7 +201,8 @@ async def init_db():
 def _deal_row(row) -> dict:
     d = dict(row)
     d["history"]    = json.loads(d.pop("history_json", "[]") or "[]")
-    d["icp"]        = json.loads(d["icp_json"]) if d.get("icp_json") else None
+    d["icp"]          = json.loads(d["icp_json"])      if d.get("icp_json")      else None
+    d["website_intel"] = json.loads(d["website_intel"]) if d.get("website_intel") else None
     d["seq_active"] = bool(d.get("seq_active", 0))
     # Keep CRM stage in sync with sequence state so the frontend board is correct
     if d.get("seq_active"):

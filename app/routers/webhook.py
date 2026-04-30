@@ -220,7 +220,7 @@ async def _run_pipeline_inner(payload: InstantlyWebhookPayload):
     # Stage 2 — Generate 5 ICP segments
     await db.update_pipeline_run(run_id, stage="icp_generation")
     try:
-        segments = await generate_icp_segments(prospect, reply)
+        segments = await generate_icp_segments(prospect, reply, deal_id=deal_id)
         # Store segments as ICP JSON (list of 5)
         await db.set_deal_icp(deal_id, {"segments": segments})
         await db.advance_deal_stage(deal_id, "icp")

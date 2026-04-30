@@ -2,11 +2,14 @@
 Pipeline Router
 
 Endpoints for triggering and monitoring the full automated pipeline:
-  POST /full-run/{deal_id}   - Run Apollo search + email draft + follow-up generation
-  GET  /status/{deal_id}     - Return current pipeline step statuses
-  POST /send-and-schedule/{deal_id} - Send drafted email + schedule follow-ups
+  POST /full-run/{deal_id}           - Run Apollo search + email draft + follow-up generation
+  GET  /status/{deal_id}             - Return current pipeline step statuses
+  POST /send-and-schedule/{deal_id}  - Send drafted email + schedule follow-ups
+  POST /extract-website/{deal_id}    - Extract structured website intelligence
+  GET  /website-intel/{deal_id}      - Retrieve stored website intelligence
 """
 
+import json
 import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from app.services import database as db
@@ -22,16 +25,12 @@ async def full_pipeline_run(deal_id: str, background_tasks: BackgroundTasks, bod
     Trigger the full automated pipeline for a deal that has ICP segments.
 
     Runs in background:
+      0. Extract website intelligence (if not already done)
       1. Apollo search across all ICP segments
       2. Save leads to DB
       3. Generate personalised delivery email
       4. Generate 4-email follow-up sequence
       5. Store results on the deal (pipeline_status, followup_draft)
-
-    The frontend polls /status/{deal_id} to track progress, then opens
-    the Send Leads modal pre-filled with the generated email and follow-ups.
-
-    Body (optional): { "auto_send": false }
     """
     deal = await db.get_deal(deal_id)
     if not deal:
@@ -46,7 +45,6 @@ async def full_pipeline_run(deal_id: str, background_tasks: BackgroundTasks, bod
         )
 
     auto_send = bool(body.get("auto_send", False))
-
     background_tasks.add_task(_run_pipeline_bg, deal_id, deal, auto_send)
     return {
         "queued":    True,
@@ -61,7 +59,7 @@ async def _run_pipeline_bg(deal_id: str, deal: dict, auto_send: bool):
     try:
         result = await run_auto_pipeline(deal_id, deal, auto_send=auto_send)
         logger.info(
-            "Auto pipeline complete for deal %s — leads: %d, sent: %s",
+            "Auto pipeline complete for deal %s - leads: %d, sent: %s",
             deal_id, result.get("lead_count", 0), result.get("sent"),
         )
     except Exception as exc:
@@ -74,7 +72,6 @@ async def pipeline_status(deal_id: str):
     Return the current pipeline step statuses for a deal.
     Used by the frontend to poll progress and know when results are ready.
     """
-    import json as _json
     deal = await db.get_deal(deal_id)
     if not deal:
         raise HTTPException(status_code=404, detail="Deal not found")
@@ -83,7 +80,7 @@ async def pipeline_status(deal_id: str):
     steps = {}
     if raw_status:
         try:
-            steps = _json.loads(raw_status) if isinstance(raw_status, str) else raw_status
+            steps = json.loads(raw_status) if isinstance(raw_status, str) else raw_status
         except Exception:
             pass
 
@@ -91,11 +88,10 @@ async def pipeline_status(deal_id: str):
     followup_draft = []
     if raw_followup:
         try:
-            followup_draft = _json.loads(raw_followup) if isinstance(raw_followup, str) else raw_followup
+            followup_draft = json.loads(raw_followup) if isinstance(raw_followup, str) else raw_followup
         except Exception:
             pass
 
-    # Determine overall status
     step_statuses = [v.get("status") for v in steps.values()]
     if any(s == "running" for s in step_statuses):
         overall = "running"
@@ -106,18 +102,93 @@ async def pipeline_status(deal_id: str):
     else:
         overall = "idle"
 
-    # Count leads in DB
-    leads = await db.get_leads_for_deal(deal_id, approved_only=False)
+    leads      = await db.get_leads_for_deal(deal_id, approved_only=False)
     lead_count = len(leads)
 
     return {
-        "deal_id":       deal_id,
-        "overall":       overall,
-        "steps":         steps,
-        "lead_count":    lead_count,
+        "deal_id":        deal_id,
+        "overall":        overall,
+        "steps":          steps,
+        "lead_count":     lead_count,
         "followup_ready": bool(followup_draft),
         "followup_draft": followup_draft,
-        "icp_ready":     bool(deal.get("icp")),
+        "icp_ready":      bool(deal.get("icp")),
+        "website_intel_ready": bool(deal.get("website_intel")),
+    }
+
+
+@router.post("/extract-website/{deal_id}")
+async def extract_website(deal_id: str, background_tasks: BackgroundTasks):
+    """
+    Trigger multi-page website extraction for a deal.
+    Crawls up to 6 pages (home, about, services, products, case studies, blog)
+    and stores structured intelligence on the deal.
+
+    Results available via GET /api/pipeline/website-intel/{deal_id}
+    """
+    deal = await db.get_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+
+    website_url = deal.get("company_website") or ""
+    if not website_url and deal.get("domain"):
+        website_url = "https://" + deal["domain"]
+
+    if not website_url:
+        raise HTTPException(
+            status_code=400,
+            detail="No company website URL for this deal. Add the website in the deal profile first.",
+        )
+
+    background_tasks.add_task(_extract_website_bg, deal_id, website_url, deal.get("company") or "")
+    return {
+        "queued":   True,
+        "deal_id":  deal_id,
+        "website":  website_url,
+        "message":  "Extraction started. Poll /api/pipeline/website-intel/" + deal_id + " for results.",
+    }
+
+
+async def _extract_website_bg(deal_id: str, website_url: str, company_name: str):
+    from app.services.website_extractor import extract_website_intel
+    try:
+        intel = await extract_website_intel(website_url, company_name)
+        pool  = await db.get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE deals SET website_intel=$1, updated_at=$2 WHERE id=$3",
+                json.dumps(intel), db.now_iso(), deal_id,
+            )
+        logger.info(
+            "Website intel stored for deal %s: status=%s pages=%s",
+            deal_id, intel.get("status"), intel.get("source_pages", []),
+        )
+    except Exception as exc:
+        logger.exception("Website extraction background failed for deal %s", deal_id)
+
+
+@router.get("/website-intel/{deal_id}")
+async def get_website_intel(deal_id: str):
+    """
+    Retrieve stored website intelligence for a deal.
+    Returns the structured data extracted from the prospect's website.
+    """
+    deal = await db.get_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+
+    raw = deal.get("website_intel")
+    intel = None
+    if raw:
+        try:
+            intel = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            pass
+
+    return {
+        "deal_id": deal_id,
+        "intel":   intel,
+        "ready":   bool(intel and intel.get("status") in ("success", "failed")),
     }
 
 
@@ -137,10 +208,10 @@ async def send_and_schedule(deal_id: str, background_tasks: BackgroundTasks, bod
     if not deal:
         raise HTTPException(status_code=404, detail="Deal not found")
 
-    subject    = (body.get("subject") or "").strip()
-    body_txt   = (body.get("body") or "").strip()
-    filename   = body.get("filename") or f"{(deal.get('company') or 'leads').lower().replace(' ', '_')}_leads.csv"
-    followups  = body.get("followups") or []
+    subject     = (body.get("subject") or "").strip()
+    body_txt    = (body.get("body") or "").strip()
+    filename    = body.get("filename") or f"{(deal.get('company') or 'leads').lower().replace(' ', '_')}_leads.csv"
+    followups   = body.get("followups") or []
     attachments = body.get("attachments") or []
 
     if not subject or not body_txt:
@@ -157,7 +228,6 @@ async def _send_and_schedule_bg(
     subject: str, body_txt: str, filename: str,
     followups: list, attachments: list,
 ):
-    import json as _json
     from app.services.outlook import send_email_via_outlook
     from app.services.apollo import leads_to_csv
     from app.services.scheduler import calculate_send_at
@@ -195,7 +265,7 @@ async def _send_and_schedule_bg(
                 now_utc, delay_days, "09:00", "Europe/London",
                 ["mon", "tue", "wed", "thu", "fri"],
             )
-            attachments_json = _json.dumps(step.get("attachments") or []) or None
+            attachments_json = json.dumps(step.get("attachments") or []) or None
             await schedule_email(
                 deal_id     = deal_id,
                 seq_id      = "auto_followup",
@@ -209,11 +279,10 @@ async def _send_and_schedule_bg(
         logger.info("send-and-schedule: %d follow-ups scheduled for deal %s", len(followups), deal_id)
 
 
-# ── Legacy endpoints (kept for backward compat) ───────────────────────────────
+# ── Legacy endpoints ──────────────────────────────────────────────────────────
 
 @router.post("/run")
 async def run_pipeline_legacy(req: dict):
-    """Legacy manual pipeline endpoint - kept for backward compatibility."""
     return {"message": "Use POST /api/pipeline/full-run/{deal_id} instead"}
 
 

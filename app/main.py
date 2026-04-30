@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="PALM Backend",
-    version="3.5.0",
+    version="3.6.0",
     lifespan=lifespan,
 )
 
@@ -49,7 +49,7 @@ app.include_router(agent.router,     prefix="/api/agent",     tags=["Agent"])
 
 @app.get("/")
 def root():
-    return {"status": "PALM backend running", "version": "3.5.0"}
+    return {"status": "PALM backend running", "version": "3.6.0"}
 
 
 @app.get("/debug/apollo")

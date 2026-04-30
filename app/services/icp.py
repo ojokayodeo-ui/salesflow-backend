@@ -2,10 +2,13 @@
 ICP Generation Service
 
 Generates 5 distinct ICP segments using Claude AI.
-Each segment represents a different audience the prospect's business could target,
-with a ready-to-use Apollo.io search prompt for manual list building.
+Uses structured website intelligence (multi-page crawl) combined with
+Instantly.ai lead data and Apify market research to ground every segment
+in real, verifiable data.
 
-No Apollo API required — Claude does the intelligence, you do the search manually.
+STRICT: No hallucination. If data is not found, ICP specificity is reduced
+        rather than guessing. Each segment includes the source signal that
+        led to its creation.
 """
 
 import json
@@ -19,47 +22,59 @@ logger = logging.getLogger(__name__)
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 
-async def scrape_website(url: str) -> str:
-    """Fetch and extract readable text from the prospect's website."""
-    if not url:
-        return ""
-    try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-            resp.raise_for_status()
-            text = resp.text
-            import re
-            text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL)
-            text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.DOTALL)
-            text = re.sub(r"<[^>]+>", " ", text)
-            text = re.sub(r"\s+", " ", text).strip()
-            return text[:5000]
-    except Exception as exc:
-        logger.warning("Website scrape failed for %s: %s", url, exc)
-        return ""
-
-
-async def generate_icp_segments(prospect: ProspectData, reply_body: str = "") -> list[dict]:
+async def generate_icp_segments(
+    prospect: ProspectData,
+    reply_body: str = "",
+    deal_id: str = "",
+) -> list[dict]:
     """
     Generate 5 distinct ICP segments for the prospect's business.
 
-    Data sources used (in order of priority):
-      1. Prospect's reply text          — primary signal
-      2. Prospect profile (Instantly)   — job title, industry, location, etc.
-      3. Prospect's website             — what they do / who they serve
-      4. Apify Google Search            — external market intelligence (if APIFY_API_TOKEN set)
+    Data pipeline (in priority order):
+      1. Prospect's reply text       -- primary signal
+      2. Structured website intel    -- multi-page crawl via website_extractor
+      3. Instantly.ai lead profile   -- job title, industry, location, headcount
+      4. Apify Google Search         -- external market intelligence
 
-    Falls back to sensible defaults if the Claude API call fails.
+    Args:
+        prospect:   Enriched prospect data from Instantly
+        reply_body: The original positive reply text
+        deal_id:    If provided, website intel is stored on the deal in DB
+
+    Returns list of 5 ICP segment dicts.
     """
+    from app.services.website_extractor import extract_website_intel
     from app.services.apify import enrich_icp_context
 
-    # ── 1. Scrape website ────────────────────────────────────────────────────
-    website_content = await scrape_website(prospect.website or "")
-    if website_content:
-        logger.info("Website scraped for %s (%d chars)", prospect.company, len(website_content))
+    # ── 1. Multi-page website extraction ────────────────────────────────────
+    website_intel: dict = {}
+    if prospect.website or prospect.domain:
+        website_url = prospect.website or (
+            "https://" + prospect.domain if prospect.domain else ""
+        )
+        website_intel = await extract_website_intel(website_url, prospect.company or "")
+        logger.info(
+            "Website intel for %s: status=%s pages=%s",
+            prospect.company,
+            website_intel.get("status", "?"),
+            website_intel.get("source_pages", []),
+        )
+
+        # Store intel on the deal immediately if deal_id provided
+        if deal_id and website_intel and website_intel.get("status") in ("success", "failed", "skipped"):
+            try:
+                from app.services import database as _db
+                pool = await _db.get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE deals SET website_intel=$1 WHERE id=$2",
+                        json.dumps(website_intel), deal_id,
+                    )
+                logger.info("Website intel stored for deal %s", deal_id)
+            except Exception as e:
+                logger.warning("Failed to store website intel for deal %s: %s", deal_id, e)
 
     # ── 2. Apify external enrichment ─────────────────────────────────────────
-    # Extract keywords from the reply to focus the searches
     reply_keywords: list[str] = []
     if reply_body and reply_body.strip():
         import re as _re
@@ -71,7 +86,7 @@ async def generate_icp_segments(prospect: ProspectData, reply_body: str = "") ->
     apify_intel = await enrich_icp_context(
         company_name   = prospect.company or "",
         domain         = prospect.domain or prospect.website or "",
-        industry       = prospect.industry or "",
+        industry       = prospect.industry or website_intel.get("industry", ""),
         reply_keywords = reply_keywords,
         location       = prospect.location or "United Kingdom",
     )
@@ -81,93 +96,118 @@ async def generate_icp_segments(prospect: ProspectData, reply_body: str = "") ->
     if apify_intel:
         parts = []
         if apify_intel.get("client_signals"):
-            parts.append("WHO THEY SERVE (from Google search):\n" +
+            parts.append("WHO THEY SERVE (Google search):\n" +
                          "\n".join(apify_intel["client_signals"]))
         if apify_intel.get("pain_points"):
-            parts.append("SECTOR PAIN POINTS (from Google search):\n" +
+            parts.append("SECTOR PAIN POINTS (Google search):\n" +
                          "\n".join(apify_intel["pain_points"]))
         if apify_intel.get("market_context"):
-            parts.append("MARKET CONTEXT & BUYING SIGNALS (from Google search):\n" +
+            parts.append("MARKET CONTEXT & BUYING SIGNALS (Google search):\n" +
                          "\n".join(apify_intel["market_context"]))
         if parts:
-            apify_block = "\n\n=== EXTERNAL MARKET INTELLIGENCE (Apify) ===\n" + \
-                          "\n\n".join(parts) + \
-                          "\n=== END EXTERNAL INTELLIGENCE ===\n"
+            apify_block = (
+                "\n\n=== EXTERNAL MARKET INTELLIGENCE (Apify Google Search) ===\n" +
+                "\n\n".join(parts) +
+                "\n=== END EXTERNAL INTELLIGENCE ===\n"
+            )
             logger.info("Apify context injected for %s (%d chars)", prospect.company, len(apify_block))
 
     # ── 4. Build reply signal block ──────────────────────────────────────────
-    reply_signals = ""
+    reply_block = ""
     if reply_body and reply_body.strip() and reply_body != "No reply text captured":
-        reply_signals = f"""
+        reply_block = f"""
 === CRITICAL: PROSPECT'S REPLY — READ THIS FIRST ===
-This is the most important signal. Extract any mentions of:
+This is the most important signal. Extract every mention of:
 - Specific industries or sectors they work in
 - Types of clients or customers they serve
 - Problems or challenges they mentioned
 - Geographic focus
 - Company types they target
-- Any specific names, sectors, or niches mentioned
+- Any specific names, sectors, or niches
 
 REPLY TEXT:
 "{reply_body}"
 === END OF REPLY ===
 """
 
-    # Build rich Instantly data block — include every non-empty field
+    # ── 5. Build Instantly lead profile block ────────────────────────────────
     instantly_fields = []
-    if prospect.name:        instantly_fields.append(f"  Name: {prospect.name}")
-    if prospect.job_title:   instantly_fields.append(f"  Job title: {prospect.job_title}")
-    if prospect.job_level:   instantly_fields.append(f"  Seniority: {prospect.job_level}")
-    if prospect.department:  instantly_fields.append(f"  Department: {prospect.department}")
-    if prospect.company:     instantly_fields.append(f"  Company: {prospect.company}")
+    if prospect.name:         instantly_fields.append(f"  Name: {prospect.name}")
+    if prospect.job_title:    instantly_fields.append(f"  Job title: {prospect.job_title}")
+    if prospect.job_level:    instantly_fields.append(f"  Seniority: {prospect.job_level}")
+    if prospect.department:   instantly_fields.append(f"  Department: {prospect.department}")
+    if prospect.company:      instantly_fields.append(f"  Company: {prospect.company}")
     if prospect.website or prospect.domain:
         instantly_fields.append(f"  Website: {prospect.website or prospect.domain}")
-    if prospect.linkedin:    instantly_fields.append(f"  LinkedIn: {prospect.linkedin}")
-    if prospect.location:    instantly_fields.append(f"  Location: {prospect.location}")
-    if prospect.headcount:   instantly_fields.append(f"  Company size: {prospect.headcount} employees")
-    if prospect.industry:    instantly_fields.append(f"  Industry: {prospect.industry}")
-    if prospect.sub_industry:instantly_fields.append(f"  Sub-industry: {prospect.sub_industry}")
-    if prospect.headline:    instantly_fields.append(f"  Headline/bio: {prospect.headline}")
-    if prospect.description: instantly_fields.append(f"  Company description: {prospect.description[:800]}")
+    if prospect.linkedin:     instantly_fields.append(f"  LinkedIn: {prospect.linkedin}")
+    if prospect.location:     instantly_fields.append(f"  Location: {prospect.location}")
+    if prospect.headcount:    instantly_fields.append(f"  Company size: {prospect.headcount} employees")
+    if prospect.industry:     instantly_fields.append(f"  Industry: {prospect.industry}")
+    if prospect.sub_industry: instantly_fields.append(f"  Sub-industry: {prospect.sub_industry}")
+    if prospect.headline:     instantly_fields.append(f"  Headline/bio: {prospect.headline}")
+    if prospect.description:  instantly_fields.append(f"  Company description: {prospect.description[:800]}")
 
     instantly_block = "\n".join(instantly_fields) if instantly_fields else "  (no Instantly data available)"
 
+    # ── 6. Build structured website intel block ───────────────────────────────
+    wi_status = website_intel.get("status", "")
+    if wi_status == "success":
+        wi_parts = []
+        wi_parts.append(f"  Pages crawled: {', '.join(website_intel.get('source_pages', []))}")
+        wi_parts.append(f"  Industry (from site): {website_intel.get('industry', 'NOT FOUND')}")
+        wi_parts.append(f"  Target customers (from site): {website_intel.get('target_customers', 'NOT FOUND')}")
+        wi_parts.append(f"  Services offered (from site): {website_intel.get('services', 'NOT FOUND')}")
+        wi_parts.append(f"  Value proposition (from site): {website_intel.get('value_proposition', 'NOT FOUND')}")
+        wi_parts.append(f"  Positioning (from site): {website_intel.get('positioning', 'NOT FOUND')}")
+        wi_parts.append(f"  Geographic focus (from site): {website_intel.get('geographic_focus', 'NOT FOUND')}")
+        wi_parts.append(f"  Key clients mentioned (from site): {website_intel.get('key_clients_mentioned', 'NOT FOUND')}")
+        kws = website_intel.get("keywords", [])
+        if kws:
+            wi_parts.append(f"  Repeated keywords: {', '.join(kws)}")
+        website_block = (
+            "\n=== STRUCTURED WEBSITE INTELLIGENCE (multi-page crawl — use only non-NOT FOUND fields) ===\n" +
+            "\n".join(wi_parts) +
+            "\n=== END WEBSITE INTELLIGENCE ===\n"
+        )
+    elif wi_status in ("failed", "skipped"):
+        reason = website_intel.get("reason", "")
+        website_block = f"\n=== WEBSITE INTELLIGENCE: unavailable ({reason}) ===\n"
+    else:
+        website_block = "\n=== WEBSITE INTELLIGENCE: not extracted ===\n"
+
     prospect_context = f"""
-{reply_signals}
-=== INSTANTLY.AI LEAD DATA (real enriched data — use every field) ===
+{reply_block}
+=== INSTANTLY.AI LEAD DATA (real enriched data) ===
 {instantly_block}
 === END INSTANTLY DATA ===
-
-=== WEBSITE CONTENT (live scraped) ===
-{website_content if website_content else 'Could not scrape. Use the Instantly data and reply above.'}
-=== END WEBSITE CONTENT ===
+{website_block}
 {apify_block}
 """.strip()
 
-    prompt = f"""You are a world-class B2B market segmentation expert. Your job is to generate 5 sharp, specific, actionable ICP segments for this prospect's outbound sales.
+    prompt = f"""You are a world-class B2B market segmentation expert. Generate 5 sharp, specific, actionable ICP segments for this prospect's outbound sales.
 
 CRITICAL RULES:
-1. Use ONLY the real data provided below. Do not invent industries, company types, or pain points not evidenced in the data.
-2. The prospect's reply is the PRIMARY signal - extract every specific detail from it (sector names, client types, problems mentioned, locations).
-3. The Instantly.ai data contains real enriched profile data - the company description and headline are particularly valuable. Use them directly.
-4. The website content shows exactly what services they offer and who they serve. Mine it for specific client types and use cases.
-5. Apify market intelligence (if present) contains real Google search data - use it to validate and sharpen pain points.
+1. Use ONLY the real data provided below. Do not invent industries, company types, or pain points not evidenced.
+2. The prospect's reply is the PRIMARY signal - extract every specific detail from it.
+3. The structured website intelligence contains fields extracted from their actual website - use any field that is NOT "NOT FOUND". Fields marked "NOT FOUND" mean the information was not found on their site and MUST NOT be used.
+4. The Instantly.ai data contains real enriched profile data - the company description and headline are particularly valuable.
+5. Apify market intelligence (if present) contains real Google search data - use it to validate pain points.
 6. Each segment must be MEANINGFULLY DIFFERENT - different industry, buyer type, company size, or pain point.
-7. Be hyper-specific: "Ecommerce founders running $1M-$10M Shopify brands" beats "online retailers".
-8. Never use em dashes (—). Use a regular hyphen (-) or rewrite the sentence.
+7. Be hyper-specific: "Ecommerce founders running 1M-10M Shopify brands" beats "online retailers".
+8. Never use em dashes. Use a regular hyphen (-) or rewrite the sentence.
 9. If a field has no real data to support it, use the closest evidenced inference and note it in reply_signal.
 
 {prospect_context}
 
-Return ONLY valid JSON - no markdown, no explanation, no fences. Use this exact structure:
-IMPORTANT: Never use em dashes (—) in any text values. Use a regular hyphen (-) or rewrite the sentence instead.
+Return ONLY valid JSON - no markdown, no explanation, no fences.
+IMPORTANT: Never use em dashes in any text values.
 
 {{
   "segments": [
     {{
       "segment_number": 1,
       "segment_name": "Short specific name e.g. NHS Procurement Directors",
-      "reply_signal": "Quote or paraphrase from the reply that led you to this segment (or 'inferred from website' if not in reply)",
+      "reply_signal": "Quote or paraphrase from the reply that led to this segment (or 'inferred from website' / 'inferred from profile')",
       "industry": "Primary industry",
       "sub_niche": "Specific sub-niche",
       "company_size": "e.g. 10-50 employees",
@@ -176,16 +216,16 @@ IMPORTANT: Never use em dashes (—) in any text values. Use a regular hyphen (-
       "hq_country": "e.g. United Kingdom",
       "target_titles": ["Title 1", "Title 2", "Title 3"],
       "secondary_titles": ["Alt Title 1", "Alt Title 2"],
-      "pain_point": "The single most pressing pain this segment faces that your prospect can solve",
+      "pain_point": "The single most pressing pain this segment faces that the prospect can solve",
       "buying_signal": "The clearest signal that a company in this segment needs help right now",
       "keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
       "cold_email_hook": "One punchy sentence that would grab this audience's attention",
-      "apollo_prompt": "A 2-3 sentence plain English description to paste into Apollo AI search. Include job titles, industry, company size, location, and specific characteristics of this segment."
+      "apollo_prompt": "A 2-3 sentence plain English description to paste into Apollo AI search. Include job titles, industry, company size, location, and specific characteristics."
     }},
-    {{segment 2}},
-    {{segment 3}},
-    {{segment 4}},
-    {{segment 5}}
+    {{"segment_number": 2}},
+    {{"segment_number": 3}},
+    {{"segment_number": 4}},
+    {{"segment_number": 5}}
   ]
 }}"""
 
@@ -204,21 +244,20 @@ IMPORTANT: Never use em dashes (—) in any text values. Use a regular hyphen (-
         async with httpx.AsyncClient(timeout=60) as client:
             resp = await client.post(ANTHROPIC_URL, json=payload, headers=headers)
             resp.raise_for_status()
-            raw = resp.json()["content"][0]["text"]
-            raw = raw.replace("```json", "").replace("```", "").strip()
+            raw  = resp.json()["content"][0]["text"]
+            raw  = raw.replace("```json", "").replace("```", "").strip()
             data = json.loads(raw)
             segments = data.get("segments", [])
             if segments:
                 logger.info(
                     "Generated %d ICP segments for %s: %s",
                     len(segments), prospect.company,
-                    [s.get("segment_name","?") for s in segments],
+                    [s.get("segment_name", "?") for s in segments],
                 )
                 return segments[:5]
     except Exception as exc:
         logger.exception("ICP segment generation failed, using fallback: %s", exc)
 
-    # Fallback segments
     return _fallback_segments(prospect)
 
 
@@ -242,8 +281,8 @@ def _fallback_segments(prospect: ProspectData) -> list[dict]:
             "pain_point": "No predictable pipeline of qualified meetings with decision-makers",
             "buying_signal": "Hiring for business development or sales roles",
             "keywords": ["consulting", "strategy", "growth", "B2B", "advisory"],
-            "cold_email_hook": "Most consulting firms grow purely on referrals — we add a predictable outbound engine alongside that.",
-            "apollo_prompt": f"Find Managing Directors, CEOs and Founders at consulting and advisory firms in {country} with 10-50 employees. Target companies that offer strategic or operational consulting services to B2B clients. Look for firms that are growing but don't have a structured outbound sales process.",
+            "cold_email_hook": "Most consulting firms grow purely on referrals - we add a predictable outbound engine alongside that.",
+            "apollo_prompt": f"Find Managing Directors, CEOs and Founders at consulting and advisory firms in {country} with 10-50 employees. Target companies that offer strategic or operational consulting services to B2B clients.",
         },
         {
             "segment_number": 2,
@@ -260,7 +299,7 @@ def _fallback_segments(prospect: ProspectData) -> list[dict]:
             "buying_signal": "Recently expanded team or added healthcare-specific services",
             "keywords": ["healthcare consulting", "NHS", "private healthcare", "clinical", "health advisory"],
             "cold_email_hook": "Healthcare consultancies that rely on frameworks and referrals are leaving consistent pipeline on the table.",
-            "apollo_prompt": f"Search for Managing Directors and Practice Leads at healthcare consulting firms in {country} with 5-30 employees. Target boutique consultancies specialising in NHS procurement, private healthcare strategy, or clinical operations. Prioritise firms that have recently hired or expanded their team.",
+            "apollo_prompt": f"Search for Managing Directors and Practice Leads at healthcare consulting firms in {country} with 5-30 employees.",
         },
         {
             "segment_number": 3,
@@ -273,11 +312,11 @@ def _fallback_segments(prospect: ProspectData) -> list[dict]:
             "hq_country": country,
             "target_titles": ["Managing Director", "Founder", "Director"],
             "secondary_titles": ["CEO", "Owner", "Head of Business Development"],
-            "pain_point": "Over-reliance on job boards and inbound — no consistent outbound to attract new client businesses",
+            "pain_point": "Over-reliance on job boards and inbound with no consistent outbound to attract new client businesses",
             "buying_signal": "Agency growing headcount but client base not keeping pace",
-            "keywords": ["recruitment agency", "staffing", "talent acquisition", "executive search", "headhunting"],
-            "cold_email_hook": "Most recruitment agencies compete on the same job boards — we help you reach new client businesses before they even post a role.",
-            "apollo_prompt": f"Find Founders and Managing Directors at specialist recruitment and staffing agencies in {country} with 5-25 employees. Focus on boutique agencies in niche sectors like healthcare, tech, or finance. Target those who place permanent candidates and rely heavily on repeat clients rather than having a structured business development function.",
+            "keywords": ["recruitment agency", "staffing", "talent acquisition", "executive search"],
+            "cold_email_hook": "Most recruitment agencies compete on the same job boards - we help you reach new client businesses before they even post a role.",
+            "apollo_prompt": f"Find Founders and Managing Directors at specialist recruitment and staffing agencies in {country} with 5-25 employees.",
         },
         {
             "segment_number": 4,
@@ -292,9 +331,9 @@ def _fallback_segments(prospect: ProspectData) -> list[dict]:
             "secondary_titles": ["Head of Business Development", "Practice Manager"],
             "pain_point": "New client acquisition is entirely referral-dependent with no scalable outbound process",
             "buying_signal": "Recently promoted to leadership or opened a new office location",
-            "keywords": ["professional services", "accounting", "financial advisory", "legal", "audit"],
-            "cold_email_hook": "Referral networks plateau — we build the outbound system that runs alongside them.",
-            "apollo_prompt": f"Search for Managing Partners, Directors and Founders at professional services firms in {country} with 10-75 employees. Target accountancy practices, financial advisory firms, and legal firms that serve B2B clients. Look for firms that have grown to a point where referrals alone are no longer sufficient to hit growth targets.",
+            "keywords": ["professional services", "accounting", "financial advisory", "legal"],
+            "cold_email_hook": "Referral networks plateau - we build the outbound system that runs alongside them.",
+            "apollo_prompt": f"Search for Managing Partners, Directors and Founders at professional services firms in {country} with 10-75 employees.",
         },
         {
             "segment_number": 5,
@@ -309,17 +348,18 @@ def _fallback_segments(prospect: ProspectData) -> list[dict]:
             "secondary_titles": ["Founder", "Chief Revenue Officer", "Sales Director"],
             "pain_point": "Sales team spending too much time on unqualified outreach with poor conversion rates",
             "buying_signal": "Actively hiring SDRs or outbound sales representatives",
-            "keywords": ["SaaS", "B2B software", "tech startup", "sales automation", "revenue growth"],
-            "cold_email_hook": "B2B SaaS teams hiring more SDRs rarely fix the underlying targeting problem — we fix the targeting.",
-            "apollo_prompt": f"Find CEOs, Heads of Sales and VP Sales at B2B SaaS and technology service companies in {country} with 15-100 employees. Target companies that sell to other businesses and have a dedicated sales team. Prioritise those actively hiring in sales or business development roles, which signals they're trying to scale outbound.",
+            "keywords": ["SaaS", "B2B software", "tech startup", "sales automation"],
+            "cold_email_hook": "B2B SaaS teams hiring more SDRs rarely fix the underlying targeting problem - we fix the targeting.",
+            "apollo_prompt": f"Find CEOs, Heads of Sales and VP Sales at B2B SaaS and technology service companies in {country} with 15-100 employees.",
         },
     ]
 
 
-# Keep backward compatibility — single ICP for pipeline use
+# ── Legacy backward-compat wrapper ────────────────────────────────────────────
+
 async def generate_icp(prospect: ProspectData, reply_body: str = ""):
     """
-    Legacy single-ICP function — returns the first segment as an ICPData-compatible dict.
+    Legacy single-ICP function - returns first segment as ICPData-compatible dict.
     Used by the webhook pipeline for backward compatibility.
     """
     from app.models.schemas import ICPData

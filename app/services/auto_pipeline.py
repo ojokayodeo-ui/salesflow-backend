@@ -1,8 +1,8 @@
 """
 Full Automated Pipeline Service
 
-Chains: Apollo search (across all ICP segments) → Lead list → Delivery email
-        → 4-email follow-up sequence generation → optional auto-send
+Chains: Website extraction → Apollo search (across all ICP segments) → Lead list
+        → Delivery email → 4-email follow-up sequence generation → optional auto-send
 
 Called either:
   - Automatically after ICP generation in the webhook pipeline
@@ -109,10 +109,11 @@ async def generate_delivery_email(
     segments: list[dict],
     reply: str,
     lead_count: int,
+    website_intel: dict | None = None,
 ) -> dict:
     """
     Generate a personalised lead delivery email using Claude.
-    Based only on real prospect data - no hallucination.
+    Optionally uses structured website intel for a more targeted opening.
     """
     first_name = (prospect.name or "there").split()[0]
     sender     = settings.default_from_name or "Kayode"
@@ -124,6 +125,19 @@ async def generate_delivery_email(
         for s in segments
     ])
 
+    # Build website intel insight block
+    wi_insight = ""
+    if website_intel and website_intel.get("status") == "success":
+        vp  = website_intel.get("value_proposition", "NOT FOUND")
+        cus = website_intel.get("target_customers",  "NOT FOUND")
+        svc = website_intel.get("services",          "NOT FOUND")
+        parts = []
+        if vp  != "NOT FOUND": parts.append(f"Value proposition: {vp}")
+        if cus != "NOT FOUND": parts.append(f"Target customers: {cus}")
+        if svc != "NOT FOUND": parts.append(f"Services: {svc}")
+        if parts:
+            wi_insight = "Website intelligence extracted:\n" + "\n".join(parts)
+
     prompt = f"""Write a professional lead delivery email from {sender} to {first_name} at {prospect.company}.
 
 Context (use ONLY this data - no hallucination):
@@ -134,6 +148,7 @@ Context (use ONLY this data - no hallucination):
 - We analysed their business and built {len(segments)} ICP segments
 - We found {lead_count} verified contacts via Apollo.io matching those ICPs
 - The CSV is attached to this email
+{wi_insight}
 
 ICP segments built:
 {seg_summary}
@@ -145,7 +160,7 @@ Write an email that:
 4. Clear CTA: book a 15-minute call to walk through the strategy
 5. Professional, warm, concise - 4 short paragraphs max
 6. Sign off as {sender}
-7. NEVER use em dashes (--). Use a hyphen (-) or rewrite the sentence.
+7. NEVER use em dashes. Use a hyphen (-) or rewrite the sentence.
 8. No placeholder text. No square brackets. Everything must be complete and real.
 
 Return ONLY the email body. No subject line."""
@@ -219,7 +234,7 @@ Sequence:
 4. delay_days: 21 - Soft close / break-up email (no pressure, leave door open)
 
 Rules:
-- NEVER use em dashes (--). Use hyphens or rewrite.
+- NEVER use em dashes. Use hyphens or rewrite.
 - No placeholder text, no [insert X], nothing fake
 - Each email under 130 words and self-contained
 - Professional but direct
@@ -323,6 +338,7 @@ async def run_auto_pipeline(
     Full pipeline for a deal that has ICP segments.
 
     Steps:
+      0. Extract website intelligence (if not already done)
       1. Search Apollo across all ICP segments - merge leads
       2. Save leads to DB
       3. Generate personalised delivery email
@@ -332,15 +348,15 @@ async def run_auto_pipeline(
     Returns a results dict the frontend can use to pre-fill the Send Leads modal.
     """
     result: dict = {
-        "deal_id":          deal_id,
-        "steps":            {},
-        "leads":            [],
-        "csv_data":         "",
-        "lead_count":       0,
-        "delivery_email":   {},
+        "deal_id":           deal_id,
+        "steps":             {},
+        "leads":             [],
+        "csv_data":          "",
+        "lead_count":        0,
+        "delivery_email":    {},
         "followup_sequence": [],
-        "sent":             False,
-        "error":            None,
+        "sent":              False,
+        "error":             None,
     }
 
     icp_data = deal.get("icp") or {}
@@ -366,6 +382,45 @@ async def run_auto_pipeline(
         department   = deal.get("department", ""),
     )
     reply = deal.get("reply_body") or ""
+
+    # ── Step 0: Website extraction (if not already done) ──────────────────────
+    website_intel = deal.get("website_intel")
+    if not website_intel and (deal.get("company_website") or deal.get("domain")):
+        await _set_status(deal_id, "website_extraction", "running")
+        try:
+            from app.services.website_extractor import extract_website_intel
+            website_url = deal.get("company_website") or (
+                "https://" + deal["domain"] if deal.get("domain") else ""
+            )
+            wi = await extract_website_intel(website_url, deal.get("company") or "")
+            if wi:
+                pool = await db.get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE deals SET website_intel=$1 WHERE id=$2",
+                        json.dumps(wi), deal_id,
+                    )
+                website_intel = wi
+                pages_crawled = len(wi.get("source_pages", []))
+                result["steps"]["website_extraction"] = {
+                    "status": "ok",
+                    "pages":  wi.get("source_pages", []),
+                }
+                await _set_status(
+                    deal_id, "website_extraction", "done",
+                    f"{pages_crawled} page(s) crawled",
+                )
+                logger.info("Website extraction complete for deal %s: %d pages", deal_id, pages_crawled)
+        except Exception as exc:
+            logger.warning("Website extraction failed (non-critical): %s", exc)
+            result["steps"]["website_extraction"] = {"status": "error", "error": str(exc)}
+            await _set_status(deal_id, "website_extraction", "error", str(exc))
+    else:
+        if website_intel:
+            result["steps"]["website_extraction"] = {"status": "ok", "reason": "already extracted"}
+        else:
+            result["steps"]["website_extraction"] = {"status": "skipped", "reason": "no website URL"}
+        await _set_status(deal_id, "website_extraction", "done", "already extracted")
 
     # ── Step 1: Apollo search ─────────────────────────────────────────────────
     await _set_status(deal_id, "apollo_search", "running")
@@ -396,7 +451,8 @@ async def run_auto_pipeline(
     await _set_status(deal_id, "email_draft", "running")
     try:
         delivery = await generate_delivery_email(
-            prospect, segments, reply, result["lead_count"]
+            prospect, segments, reply, result["lead_count"],
+            website_intel=website_intel if isinstance(website_intel, dict) else None,
         )
         result["delivery_email"] = delivery
         result["steps"]["email_draft"] = {"status": "ok"}
@@ -412,7 +468,6 @@ async def run_auto_pipeline(
         followups = await generate_followup_sequence(prospect, segments, reply)
         result["followup_sequence"] = followups
 
-        # Store draft in DB so frontend can load it any time
         pool = await db.get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
@@ -436,14 +491,14 @@ async def run_auto_pipeline(
                 f"{(deal.get('company') or 'leads').lower().replace(' ', '_')}_leads.csv"
             )
             send_result = await send_email_via_outlook(
-                to_email          = deal["email"],
-                to_name           = deal["name"],
-                from_name         = settings.default_from_name or "Kayode",
-                subject           = result["delivery_email"]["subject"],
-                body              = result["delivery_email"]["body"],
-                csv_data          = result["csv_data"] or None,
-                csv_filename      = csv_filename,
-                deal_id           = deal_id,
+                to_email     = deal["email"],
+                to_name      = deal["name"],
+                from_name    = settings.default_from_name or "Kayode",
+                subject      = result["delivery_email"]["subject"],
+                body         = result["delivery_email"]["body"],
+                csv_data     = result["csv_data"] or None,
+                csv_filename = csv_filename,
+                deal_id      = deal_id,
             )
             if send_result.get("success"):
                 result["sent"] = True
