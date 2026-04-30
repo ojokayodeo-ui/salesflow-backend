@@ -194,6 +194,7 @@ async def run_lead_list_agent(
     segments: list[dict],
     prospect_company: str = "",
     deal_id: str = "",
+    target_count: int = 100,
 ) -> dict:
     """
     Run the Lead List Generation Agent.
@@ -238,6 +239,7 @@ async def run_lead_list_agent(
         )
     seg_context = "\n\n".join(seg_lines)
 
+    per_seg_target = max(25, target_count // min(len(segments), 3))
     system = f"""You are the Lead List Generation Agent for PALM — a B2B outbound system.
 
 Your job: search Apollo.io to build a high-quality lead list for {prospect_company or 'the prospect'} using the ICP segments below.
@@ -247,7 +249,7 @@ STRATEGY:
 - For each chosen segment, call search_apollo with filters derived directly from the segment.
 - Map segment data to Apollo parameters: titles → person_titles, location → person_locations, employee range → employee_min/max, keywords → keywords (use sparingly).
 - If a search returns fewer than 10 leads, consider relaxing filters (remove keywords or employee range) and try again.
-- Target 25-40 leads per segment. Total goal: 75-120 unique verified leads.
+- Target {per_seg_target} leads per segment. Total goal: {target_count} unique verified leads.
 - After searching your chosen segments, call finalize_leads with your summary.
 
 QUALITY RULES:

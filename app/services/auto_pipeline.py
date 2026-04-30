@@ -426,7 +426,9 @@ async def run_auto_pipeline(
     await _set_status(deal_id, "apollo_search", "running")
     if settings.apollo_api_key:
         try:
-            leads = await search_leads_across_segments(segments, total_limit=100)
+            cfg = await db.get_pipeline_config()
+            lead_limit = cfg["lead_count"]
+            leads = await search_leads_across_segments(segments, total_limit=lead_limit)
             result["leads"]      = leads
             result["lead_count"] = len(leads)
 

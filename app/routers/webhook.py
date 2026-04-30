@@ -301,14 +301,29 @@ View deal: {_os.environ.get("APP_URL", "https://pipeline-activation-leadmagnet.n
     refreshed_deal = await db.get_deal(deal_id)
     if refreshed_deal:
         try:
-            from app.services.auto_pipeline import run_auto_pipeline
+            cfg = await db.get_pipeline_config()
+            delay_seconds = cfg["send_delay_seconds"]
             import asyncio as _asyncio
-            _asyncio.create_task(
-                run_auto_pipeline(deal_id, refreshed_deal, auto_send=False)
-            )
-            logger.info("Auto-pipeline build queued for %s", prospect.company)
+            _asyncio.create_task(_delayed_auto_pipeline(deal_id, refreshed_deal, delay_seconds))
+            if delay_seconds:
+                h, m, s = delay_seconds // 3600, (delay_seconds % 3600) // 60, delay_seconds % 60
+                logger.info(
+                    "Auto-pipeline queued for %s with %02d:%02d:%02d delay",
+                    prospect.company, h, m, s,
+                )
+            else:
+                logger.info("Auto-pipeline build queued for %s", prospect.company)
         except Exception as exc:
             logger.warning("Auto-pipeline queue failed (non-critical): %s", exc)
+
+
+async def _delayed_auto_pipeline(deal_id: str, deal: dict, delay_seconds: int):
+    """Wait delay_seconds then run auto-pipeline (respects configured send delay)."""
+    if delay_seconds > 0:
+        logger.info("Auto-pipeline waiting %ds before starting for deal %s", delay_seconds, deal_id)
+        await asyncio.sleep(delay_seconds)
+    from app.services.auto_pipeline import run_auto_pipeline
+    await run_auto_pipeline(deal_id, deal, auto_send=False)
 
 
 @router.get("/debug-enrich/{email}")

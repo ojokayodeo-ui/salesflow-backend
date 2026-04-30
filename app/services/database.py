@@ -732,6 +732,17 @@ CREATE TABLE IF NOT EXISTS email_events (
 )"""
 
 
+CREATE_PIPELINE_CONFIG = """
+CREATE TABLE IF NOT EXISTS pipeline_config (
+    id                  INTEGER PRIMARY KEY DEFAULT 1,
+    lead_count          INTEGER NOT NULL DEFAULT 100,
+    send_delay_seconds  INTEGER NOT NULL DEFAULT 0,
+    updated_at          TEXT NOT NULL,
+    CONSTRAINT single_row CHECK (id = 1)
+)
+"""
+
+
 async def ensure_extra_tables():
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -743,7 +754,43 @@ async def ensure_extra_tables():
         await conn.execute(CREATE_NURTURE_SEQUENCES)
         await conn.execute(CREATE_NURTURE_SEQ_STEPS)
         await conn.execute(CREATE_NURTURE_ENROLLMENTS)
+        await conn.execute(CREATE_PIPELINE_CONFIG)
+        # Seed default row if table is empty
+        await conn.execute(
+            """INSERT INTO pipeline_config (id, lead_count, send_delay_seconds, updated_at)
+               VALUES (1, 100, 0, $1)
+               ON CONFLICT (id) DO NOTHING""",
+            now_iso(),
+        )
     logger.info("Extra tables ready")
+
+
+# ── Pipeline Config ───────────────────────────────────────────────────────────
+
+async def get_pipeline_config() -> dict:
+    """Return current pipeline automation settings."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM pipeline_config WHERE id=1")
+    if row:
+        return {"lead_count": row["lead_count"], "send_delay_seconds": row["send_delay_seconds"]}
+    return {"lead_count": 100, "send_delay_seconds": 0}
+
+
+async def save_pipeline_config(lead_count: int, send_delay_seconds: int) -> dict:
+    """Upsert pipeline automation settings."""
+    lead_count         = max(10, min(500, int(lead_count)))
+    send_delay_seconds = max(0, min(86400, int(send_delay_seconds)))
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO pipeline_config (id, lead_count, send_delay_seconds, updated_at)
+               VALUES (1, $1, $2, $3)
+               ON CONFLICT (id) DO UPDATE
+               SET lead_count=$1, send_delay_seconds=$2, updated_at=$3""",
+            lead_count, send_delay_seconds, now_iso(),
+        )
+    return {"lead_count": lead_count, "send_delay_seconds": send_delay_seconds}
 
 
 # ── Notes ────────────────────────────────────────────────────────────────────

@@ -261,10 +261,12 @@ async def _lead_list_bg(deal_id: str, deal: dict, segments: list[dict]):
     try:
         await db._set_pipeline_step(deal_id, "apollo_search", "running")
 
+        cfg = await db.get_pipeline_config()
         result = await run_lead_list_agent(
             segments         = segments,
             prospect_company = deal.get("company") or "",
             deal_id          = deal_id,
+            target_count     = cfg["lead_count"],
         )
 
         leads    = result["leads"]
