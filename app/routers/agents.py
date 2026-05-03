@@ -203,8 +203,19 @@ async def _icp_bg(deal_id: str, deal: dict):
             headline     = deal.get("headline", ""),
             department   = deal.get("department", ""),
         )
-        reply    = deal.get("reply_body") or ""
-        segments = await generate_icp_segments(prospect, reply, deal_id=deal_id)
+        reply = deal.get("reply_body") or ""
+
+        # Use already-stored website intel — avoids redundant crawl and ensures
+        # ICP is grounded in the same real data the Website Intel Agent extracted
+        stored_intel = deal.get("website_intel")
+        existing_wi  = stored_intel if isinstance(stored_intel, dict) else None
+
+        segments = await generate_icp_segments(
+            prospect,
+            reply,
+            deal_id              = deal_id,
+            existing_website_intel = existing_wi,
+        )
         await db.set_deal_icp(deal_id, {"segments": segments})
         await db.advance_deal_stage(deal_id, "icp")
         logger.info("Agent 2 (ICP) complete for deal %s: %d segments", deal_id, len(segments))
@@ -512,10 +523,20 @@ async def create_test_deal(body: dict):
         headline        = "",
         reply_subject   = "Re: Quick question",
     )
+    deal_id = deal["id"]
+
+    # Auto-kick website extraction in background if URL provided —
+    # so intel is ready by the time the user hits Run on any agent
+    if website:
+        import asyncio as _asyncio
+        _asyncio.create_task(_website_intel_bg(deal_id, website, company))
+        logger.info("test-deal: website extraction queued for %s (%s)", company, website)
+
     return {
-        "deal_id": deal["id"],
+        "deal_id": deal_id,
         "created": True,
-        "message": f"Test deal created for {company}",
+        "message": f"Test deal created for {company}" + (" — extracting website intel..." if website else ""),
+        "website_extraction_queued": bool(website),
     }
 
 

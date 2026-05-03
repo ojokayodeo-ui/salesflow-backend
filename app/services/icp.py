@@ -26,29 +26,39 @@ async def generate_icp_segments(
     prospect: ProspectData,
     reply_body: str = "",
     deal_id: str = "",
+    existing_website_intel: dict | None = None,
 ) -> list[dict]:
     """
     Generate 5 distinct ICP segments for the prospect's business.
 
     Data pipeline (in priority order):
       1. Prospect's reply text       -- primary signal
-      2. Structured website intel    -- multi-page crawl via website_extractor
+      2. Structured website intel    -- passed in OR fresh multi-page crawl
       3. Instantly.ai lead profile   -- job title, industry, location, headcount
       4. Apify Google Search         -- external market intelligence
 
     Args:
-        prospect:   Enriched prospect data from Instantly
-        reply_body: The original positive reply text
-        deal_id:    If provided, website intel is stored on the deal in DB
+        prospect:               Enriched prospect data from Instantly
+        reply_body:             The original positive reply text
+        deal_id:                If provided, website intel is stored on the deal in DB
+        existing_website_intel: If already extracted, use directly — no re-crawl
 
     Returns list of 5 ICP segment dicts.
     """
     from app.services.website_extractor import extract_website_intel
     from app.services.apify import enrich_icp_context
 
-    # ── 1. Multi-page website extraction ────────────────────────────────────
+    # ── 1. Website intelligence — use stored intel if available ─────────────
     website_intel: dict = {}
-    if prospect.website or prospect.domain:
+    if existing_website_intel and existing_website_intel.get("status") == "success":
+        website_intel = existing_website_intel
+        logger.info(
+            "ICP: using stored website intel for %s (%d chars, pages: %s)",
+            prospect.company,
+            website_intel.get("raw_text_chars", 0),
+            website_intel.get("source_pages", []),
+        )
+    elif prospect.website or prospect.domain:
         website_url = prospect.website or (
             "https://" + prospect.domain if prospect.domain else ""
         )
