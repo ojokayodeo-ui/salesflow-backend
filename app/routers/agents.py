@@ -635,7 +635,12 @@ async def get_agent_outputs(deal_id: str):
         except Exception:
             pass
 
-    email_step = pipeline_steps.get("email_draft", {})
+    email_step  = pipeline_steps.get("email_draft", {})
+    send_step   = pipeline_steps.get("email_send", {})
+    email_sent  = send_step.get("status") in ("done", "ok")
+
+    from app.services.apollo import leads_to_csv
+    csv_data = leads_to_csv(leads) if leads else ""
 
     return {
         "deal_id":           deal_id,
@@ -646,8 +651,10 @@ async def get_agent_outputs(deal_id: str):
         "icp_segments":      segments,
         "lead_count":        len(leads),
         "leads_sample":      leads[:5],
+        "csv_data":          csv_data,
         "email_subject":     email_step.get("subject", ""),
         "email_body":        email_step.get("body", ""),
+        "email_sent":        email_sent,
         "followup_sequence": followups,
         "pipeline_steps":    pipeline_steps,
     }
