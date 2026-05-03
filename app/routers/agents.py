@@ -349,7 +349,10 @@ async def _email_draft_bg(deal_id: str, deal: dict, segments: list[dict]):
                 except Exception:
                     pass
             current_status["email_draft"] = {
-                "status": "done", "subject": draft.get("subject", ""), "ts": db.now_iso()
+                "status": "done",
+                "subject": draft.get("subject", ""),
+                "body":    draft.get("body", ""),
+                "ts":      db.now_iso(),
             }
             await conn.execute(
                 "UPDATE deals SET pipeline_status=$1 WHERE id=$2",
@@ -460,3 +463,106 @@ async def _pipeline_bg(deal_id: str, deal: dict, auto_send: bool):
         )
     except Exception:
         logger.exception("Agent 6 (pipeline) failed for deal %s", deal_id)
+
+
+# ── Agents Lab helpers ────────────────────────────────────────────────────────
+
+@router.post("/test-deal")
+async def create_test_deal(body: dict):
+    """
+    Create a quick test deal for the Agents Lab without needing Instantly.
+    Returns existing deal if the email already has one.
+    """
+    email = (body.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=422, detail="email is required")
+
+    existing = await db.get_deal_by_email(email)
+    if existing:
+        return {
+            "deal_id": existing["id"],
+            "created": False,
+            "message": f"Deal already exists for {existing.get('company') or email}",
+        }
+
+    raw_name    = (body.get("name") or "").strip()
+    raw_company = (body.get("company") or "").strip()
+    website     = (body.get("website") or "").strip()
+    domain      = email.split("@")[1] if "@" in email else ""
+    name        = raw_name    or email.split("@")[0].replace(".", " ").title()
+    company     = raw_company or domain.split(".")[0].title()
+
+    deal = await db.create_deal(
+        name            = name,
+        email           = email,
+        company         = company,
+        domain          = domain,
+        campaign        = "Agents Lab Test",
+        reply_body      = body.get("reply") or "Yes, sounds interesting — tell me more about what you offer.",
+        job_title       = body.get("job_title") or "",
+        job_level       = "",
+        department      = "",
+        linkedin        = "",
+        location        = body.get("location") or "",
+        headcount       = "",
+        industry        = body.get("industry") or "",
+        sub_industry    = "",
+        company_website = website,
+        company_desc    = "",
+        headline        = "",
+        reply_subject   = "Re: Quick question",
+    )
+    return {
+        "deal_id": deal["id"],
+        "created": True,
+        "message": f"Test deal created for {company}",
+    }
+
+
+@router.get("/outputs/{deal_id}")
+async def get_agent_outputs(deal_id: str):
+    """
+    Return all current agent outputs for a deal in one call.
+    Used by the Agents Lab to populate output previews after each run.
+    """
+    deal = await db.get_deal(deal_id)
+    if not deal:
+        raise HTTPException(status_code=404, detail="Deal not found")
+
+    pipeline_steps: dict = {}
+    raw = deal.get("pipeline_status")
+    if raw:
+        try:
+            pipeline_steps = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:
+            pass
+
+    icp_data = deal.get("icp") or {}
+    segments = icp_data.get("segments", []) if isinstance(icp_data, dict) else []
+
+    leads = await db.get_leads_for_deal(deal_id, approved_only=False)
+
+    followups: list = []
+    raw_fu = deal.get("followup_draft")
+    if raw_fu:
+        try:
+            followups = json.loads(raw_fu) if isinstance(raw_fu, str) else raw_fu
+        except Exception:
+            pass
+
+    email_step = pipeline_steps.get("email_draft", {})
+
+    return {
+        "deal_id":           deal_id,
+        "company":           deal.get("company"),
+        "name":              deal.get("name"),
+        "email":             deal.get("email"),
+        "website_intel":     deal.get("website_intel"),
+        "icp_segments":      segments,
+        "lead_count":        len(leads),
+        "leads_sample":      leads[:5],
+        "email_subject":     email_step.get("subject", ""),
+        "email_body":        email_step.get("body", ""),
+        "followup_sequence": followups,
+        "pipeline_steps":    pipeline_steps,
+    }
