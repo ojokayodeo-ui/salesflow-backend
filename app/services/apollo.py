@@ -31,6 +31,9 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
     country = icp.hq_country or "United Kingdom"
 
     # Build payload — confirmed working format
+    emp_min = icp.apollo_employee_min or 0
+    emp_max = icp.apollo_employee_max or 0
+
     payload = {
         "per_page": min(limit, 100),
         "page": 1,
@@ -40,8 +43,6 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
     }
 
     # Only add employee range if it's reasonable
-    emp_min = icp.apollo_employee_min or 0
-    emp_max = icp.apollo_employee_max or 0
     if emp_min > 0 and emp_max > 0 and emp_max <= 10000:
         payload["organization_num_employees_ranges[]"] = [f"{emp_min},{emp_max}"]
 
@@ -57,6 +58,28 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
         "Cache-Control": "no-cache",
     }
 
+    def _extract_leads(people: list) -> list:
+        result = []
+        for p in people:
+            email = (p.get("email") or "").strip()
+            if not email:
+                continue
+            email_status = (p.get("email_status") or p.get("contact_email_status") or "").lower()
+            if email_status == "catch_all":
+                continue
+            result.append({
+                "first_name":   p.get("first_name", ""),
+                "last_name":    p.get("last_name", ""),
+                "full_name":    p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
+                "title":        p.get("title", ""),
+                "email":        email,
+                "company":      (p.get("organization") or {}).get("name", ""),
+                "city":         p.get("city", ""),
+                "country":      p.get("country", ""),
+                "linkedin_url": p.get("linkedin_url", ""),
+            })
+        return result
+
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
@@ -71,56 +94,35 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
         total = data.get("pagination", {}).get("total_entries", 0)
         logger.info("Apollo: %d people returned (total available: %s)", len(people), total)
 
-        leads = []
-        for p in people:
-            email = (p.get("email") or "").strip()
-            if not email:
-                continue
-            email_status = (p.get("email_status") or p.get("contact_email_status") or "").lower()
-            if email_status == "catch_all":
-                continue
-            leads.append({
-                "first_name":   p.get("first_name", ""),
-                "last_name":    p.get("last_name", ""),
-                "full_name":    p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
-                "title":        p.get("title", ""),
-                "email":        email,
-                "company":      (p.get("organization") or {}).get("name", ""),
-                "city":         p.get("city", ""),
-                "country":      p.get("country", ""),
-                "linkedin_url": p.get("linkedin_url", ""),
-            })
+        leads = _extract_leads(people)
 
-        logger.info("Apollo: %d leads with verified emails (catch_all excluded)", len(leads))
-
-        # If still 0 results, try without employee range
-        if not leads and emp_min and emp_max:
-            logger.info("Retrying without employee range filter...")
+        # Retry 1: drop employee range if no results
+        if not leads and (emp_min or emp_max):
+            logger.info("Apollo: retrying without employee range")
             payload.pop("organization_num_employees_ranges[]", None)
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(APOLLO_SEARCH_URL, json=payload, headers=headers)
                 resp.raise_for_status()
                 data = resp.json()
             people = data.get("people", [])
-            for p in people:
-                email = (p.get("email") or "").strip()
-                if not email:
-                    continue
-                email_status = (p.get("email_status") or p.get("contact_email_status") or "").lower()
-                if email_status == "catch_all":
-                    continue
-                leads.append({
-                    "first_name":   p.get("first_name", ""),
-                    "last_name":    p.get("last_name", ""),
-                    "full_name":    p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
-                    "title":        p.get("title", ""),
-                    "email":        email,
-                    "company":      (p.get("organization") or {}).get("name", ""),
-                    "city":         p.get("city", ""),
-                    "country":      p.get("country", ""),
-                    "linkedin_url": p.get("linkedin_url", ""),
-                })
-            logger.info("Apollo retry: %d leads (catch_all excluded)", len(leads))
+            total  = data.get("pagination", {}).get("total_entries", 0)
+            leads  = _extract_leads(people)
+
+        # Retry 2: broaden to likely_to_engage if verified alone returns nothing
+        if not leads:
+            logger.info("Apollo: no verified emails found — retrying with likely_to_engage")
+            payload["contact_email_status[]"] = ["verified", "likely_to_engage"]
+            payload.pop("organization_num_employees_ranges[]", None)
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(APOLLO_SEARCH_URL, json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+            people = data.get("people", [])
+            total  = data.get("pagination", {}).get("total_entries", 0)
+            leads  = _extract_leads(people)
+            logger.info("Apollo likely_to_engage retry: %d leads", len(leads))
+
+        logger.info("Apollo: %d leads with valid emails (catch_all excluded)", len(leads))
 
         return leads[:limit]
 

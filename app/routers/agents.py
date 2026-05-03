@@ -281,20 +281,46 @@ async def run_lead_list_agent(deal_id: str, background_tasks: BackgroundTasks):
 
 async def _lead_list_bg(deal_id: str, deal: dict, segments: list[dict]):
     from app.services.lead_list_agent import run_lead_list_agent
-    try:
-        await db._set_pipeline_step(deal_id, "apollo_search", "running")
+    from app.services.auto_pipeline import search_leads_across_segments
+    from app.services.apollo import leads_to_csv
 
-        cfg = await db.get_pipeline_config()
+    await db._set_pipeline_step(deal_id, "apollo_search", "running")
+    cfg = await db.get_pipeline_config()
+    leads: list[dict] = []
+    detail = ""
+
+    # ── Try agentic approach first ────────────────────────────────────────────
+    try:
         result = await run_lead_list_agent(
             segments         = segments,
             prospect_company = deal.get("company") or "",
             deal_id          = deal_id,
             target_count     = cfg["lead_count"],
         )
+        leads  = result["leads"]
+        detail = (
+            f"{result['lead_count']} leads from {result['searches_performed']} searches "
+            f"({', '.join(result['segments_searched'])})"
+        )
+        logger.info("Agent 3 (agentic) complete for deal %s: %d leads", deal_id, len(leads))
+    except Exception as exc:
+        logger.warning("Agent 3 agentic approach failed for deal %s: %s — falling back to direct search", deal_id, exc)
 
-        leads    = result["leads"]
-        csv_data = result["csv_data"]
+    # ── Fallback: direct segment search if agentic returned nothing ───────────
+    if not leads:
+        try:
+            logger.info("Agent 3 (direct fallback): searching %d segments for deal %s", len(segments), deal_id)
+            leads = await search_leads_across_segments(segments, total_limit=cfg["lead_count"])
+            detail = f"{len(leads)} leads via direct segment search"
+            logger.info("Agent 3 (direct fallback) complete for deal %s: %d leads", deal_id, len(leads))
+        except Exception as exc:
+            logger.exception("Agent 3 direct fallback also failed for deal %s: %s", deal_id, exc)
+            await db._set_pipeline_step(deal_id, "apollo_search", "error",
+                                        f"Apollo search failed: {exc}")
+            return
 
+    # ── Save results ──────────────────────────────────────────────────────────
+    try:
         if leads:
             run_id = await db.start_pipeline_run(deal_id)
             await db.save_leads(deal_id, run_id, leads)
@@ -302,17 +328,11 @@ async def _lead_list_bg(deal_id: str, deal: dict, segments: list[dict]):
 
         await db._set_pipeline_step(
             deal_id, "apollo_search", "done",
-            f"{result['lead_count']} leads from {result['searches_performed']} searches "
-            f"({', '.join(result['segments_searched'])})",
+            detail or f"{len(leads)} leads found",
         )
-
-        logger.info(
-            "Agent 3 (lead list) complete for deal %s: %d leads, %d searches",
-            deal_id, result["lead_count"], result["searches_performed"],
-        )
-    except Exception:
-        logger.exception("Agent 3 (lead list) failed for deal %s", deal_id)
-        await db._set_pipeline_step(deal_id, "apollo_search", "error", "Agent failed — check logs")
+    except Exception as exc:
+        logger.exception("Agent 3 save failed for deal %s", deal_id)
+        await db._set_pipeline_step(deal_id, "apollo_search", "error", f"Save failed: {exc}")
 
 
 # ── Agent 4: Email Draft ──────────────────────────────────────────────────────
@@ -658,3 +678,57 @@ async def get_agent_outputs(deal_id: str):
         "followup_sequence": followups,
         "pipeline_steps":    pipeline_steps,
     }
+
+
+# ── Apollo connection test ────────────────────────────────────────────────────
+
+@router.get("/debug/apollo")
+async def debug_apollo_connection():
+    """
+    Quick Apollo.io connection test — runs a minimal search and returns raw results.
+    Use this to verify the API key works and see what fields Apollo actually returns.
+    """
+    if not settings.apollo_api_key:
+        return {"ok": False, "error": "APOLLO_API_KEY is not set in environment"}
+
+    import httpx as _httpx
+    APOLLO_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
+    payload = {
+        "per_page": 5,
+        "page":     1,
+        "person_titles[]":        ["Managing Director", "CEO", "Founder"],
+        "person_locations[]":     ["United Kingdom"],
+        "contact_email_status[]": ["verified"],
+    }
+    headers = {
+        "Content-Type":  "application/json",
+        "X-Api-Key":     settings.apollo_api_key,
+        "Cache-Control": "no-cache",
+    }
+    try:
+        async with _httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(APOLLO_URL, json=payload, headers=headers)
+        raw = resp.json()
+        people = raw.get("people", [])
+        sample = []
+        for p in people[:3]:
+            sample.append({
+                "name":         p.get("name"),
+                "title":        p.get("title"),
+                "email":        p.get("email"),
+                "email_status": p.get("email_status"),
+                "contact_email_status": p.get("contact_email_status"),
+                "city":         p.get("city"),
+                "country":      p.get("country"),
+            })
+        return {
+            "ok":            resp.status_code == 200,
+            "http_status":   resp.status_code,
+            "total_entries": raw.get("pagination", {}).get("total_entries", 0),
+            "people_returned": len(people),
+            "people_with_email": sum(1 for p in people if p.get("email")),
+            "sample":        sample,
+            "api_key_prefix": settings.apollo_api_key[:6] + "..." if settings.apollo_api_key else "",
+        }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
