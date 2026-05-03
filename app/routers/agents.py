@@ -101,10 +101,19 @@ async def agent_status(deal_id: str):
         "lead_list":         steps.get("apollo_search", {}).get("status", "idle"),
         "email_draft":       steps.get("email_draft", {}).get("status", "idle"),
         "followup_sequence": steps.get("followup_gen", {}).get("status", "idle"),
-        "pipeline":          "done" if all(
-            steps.get(k, {}).get("status") in ("done", "ok", "skipped")
-            for k in ("apollo_search", "email_draft", "followup_gen")
-        ) and steps else "idle",
+        "pipeline":          (
+            "done" if steps.get("email_send", {}).get("status") in ("done", "ok")
+            else "running" if any(
+                steps.get(k, {}).get("status") == "running"
+                for k in ("website_extraction", "icp_generation", "apollo_search",
+                          "email_draft", "followup_gen", "email_send")
+            ) and steps
+            else "done" if all(
+                steps.get(k, {}).get("status") in ("done", "ok", "skipped")
+                for k in ("apollo_search", "email_draft", "followup_gen")
+            ) and steps
+            else "idle"
+        ),
     }
 
     return {
@@ -448,7 +457,7 @@ async def run_pipeline_agent(deal_id: str, background_tasks: BackgroundTasks, bo
     if not deal:
         raise HTTPException(status_code=404, detail="Deal not found")
 
-    auto_send = bool(body.get("auto_send", False))
+    auto_send = bool(body.get("auto_send", True))
     background_tasks.add_task(_pipeline_bg, deal_id, deal, auto_send)
     return {
         "agent":     "pipeline",

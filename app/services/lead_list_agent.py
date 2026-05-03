@@ -149,6 +149,9 @@ async def _execute_apollo_search(
         email = (p.get("email") or "").strip()
         if not email:
             continue
+        email_status = (p.get("email_status") or p.get("contact_email_status") or "").lower()
+        if email_status == "catch_all":
+            continue
         leads.append({
             "first_name":   p.get("first_name", ""),
             "last_name":    p.get("last_name", ""),
@@ -174,6 +177,9 @@ async def _execute_apollo_search(
         for p in people:
             email = (p.get("email") or "").strip()
             if not email:
+                continue
+            email_status = (p.get("email_status") or p.get("contact_email_status") or "").lower()
+            if email_status == "catch_all":
                 continue
             leads.append({
                 "first_name":   p.get("first_name", ""),

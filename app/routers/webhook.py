@@ -323,7 +323,7 @@ async def _delayed_auto_pipeline(deal_id: str, deal: dict, delay_seconds: int):
         logger.info("Auto-pipeline waiting %ds before starting for deal %s", delay_seconds, deal_id)
         await asyncio.sleep(delay_seconds)
     from app.services.auto_pipeline import run_auto_pipeline
-    await run_auto_pipeline(deal_id, deal, auto_send=False)
+    await run_auto_pipeline(deal_id, deal, auto_send=True)
 
 
 @router.get("/debug-enrich/{email}")

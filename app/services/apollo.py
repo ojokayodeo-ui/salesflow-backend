@@ -76,6 +76,9 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
             email = (p.get("email") or "").strip()
             if not email:
                 continue
+            email_status = (p.get("email_status") or p.get("contact_email_status") or "").lower()
+            if email_status == "catch_all":
+                continue
             leads.append({
                 "first_name":   p.get("first_name", ""),
                 "last_name":    p.get("last_name", ""),
@@ -88,7 +91,7 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
                 "linkedin_url": p.get("linkedin_url", ""),
             })
 
-        logger.info("Apollo: %d leads with verified emails", len(leads))
+        logger.info("Apollo: %d leads with verified emails (catch_all excluded)", len(leads))
 
         # If still 0 results, try without employee range
         if not leads and emp_min and emp_max:
@@ -103,6 +106,9 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
                 email = (p.get("email") or "").strip()
                 if not email:
                     continue
+                email_status = (p.get("email_status") or p.get("contact_email_status") or "").lower()
+                if email_status == "catch_all":
+                    continue
                 leads.append({
                     "first_name":   p.get("first_name", ""),
                     "last_name":    p.get("last_name", ""),
@@ -114,7 +120,7 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
                     "country":      p.get("country", ""),
                     "linkedin_url": p.get("linkedin_url", ""),
                 })
-            logger.info("Apollo retry: %d leads", len(leads))
+            logger.info("Apollo retry: %d leads (catch_all excluded)", len(leads))
 
         return leads[:limit]
 
