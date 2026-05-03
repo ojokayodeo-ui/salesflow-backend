@@ -92,13 +92,16 @@ async def agent_status(deal_id: str):
         except Exception:
             pass
 
+    icp_step_status = steps.get("icp_generation", {}).get("status")
+    icp_status = icp_step_status if icp_step_status else ("done" if deal.get("icp") else "idle")
+
     status_map = {
-        "website_intel":    steps.get("website_extraction", {}).get("status", "idle"),
-        "icp_generation":   "done" if deal.get("icp") else "idle",
-        "lead_list":        steps.get("apollo_search", {}).get("status", "idle"),
-        "email_draft":      steps.get("email_draft", {}).get("status", "idle"),
-        "followup_sequence":steps.get("followup_gen", {}).get("status", "idle"),
-        "pipeline":         "done" if all(
+        "website_intel":     steps.get("website_extraction", {}).get("status", "idle"),
+        "icp_generation":    icp_status,
+        "lead_list":         steps.get("apollo_search", {}).get("status", "idle"),
+        "email_draft":       steps.get("email_draft", {}).get("status", "idle"),
+        "followup_sequence": steps.get("followup_gen", {}).get("status", "idle"),
+        "pipeline":          "done" if all(
             steps.get(k, {}).get("status") in ("done", "ok", "skipped")
             for k in ("apollo_search", "email_draft", "followup_gen")
         ) and steps else "idle",
@@ -438,20 +441,12 @@ async def _followup_bg(deal_id: str, deal: dict, segments: list[dict]):
 async def run_pipeline_agent(deal_id: str, background_tasks: BackgroundTasks, body: dict = {}):
     """
     Agent 6 — Pipeline Orchestrator.
-    Runs all agents in sequence: Website Intel → ICP → Leads → Email → Follow-ups.
-    Delegates to the existing auto_pipeline service.
+    Runs the FULL chain from scratch: Website Intel → ICP → Leads → Email → Follow-ups.
+    Works on any deal — ICP segments do not need to exist beforehand.
     """
     deal = await db.get_deal(deal_id)
     if not deal:
         raise HTTPException(status_code=404, detail="Deal not found")
-
-    icp_data = deal.get("icp") or {}
-    segments = icp_data.get("segments", []) if isinstance(icp_data, dict) else []
-    if not segments:
-        raise HTTPException(
-            status_code=400,
-            detail="No ICP segments found. Run the ICP Generation Agent first.",
-        )
 
     auto_send = bool(body.get("auto_send", False))
     background_tasks.add_task(_pipeline_bg, deal_id, deal, auto_send)
@@ -460,20 +455,80 @@ async def run_pipeline_agent(deal_id: str, background_tasks: BackgroundTasks, bo
         "queued":    True,
         "deal_id":   deal_id,
         "auto_send": auto_send,
-        "message":   "Pipeline Orchestrator started. Poll /api/agents/status/" + deal_id,
+        "message":   "Pipeline Orchestrator started — Website Intel → ICP → Leads → Email → Follow-ups. Poll /api/agents/status/" + deal_id,
     }
 
 
 async def _pipeline_bg(deal_id: str, deal: dict, auto_send: bool):
+    """
+    Full pipeline from scratch.
+    Step 1: Website Intel (if not already successfully extracted)
+    Step 2: ICP Generation (always runs fresh, uses stored intel if available)
+    Step 3: Leads → Email → Follow-ups (via run_auto_pipeline)
+    """
+    from app.services.icp import generate_icp_segments
     from app.services.auto_pipeline import run_auto_pipeline
+    from app.models.schemas import ProspectData
+
     try:
+        # ── Step 1: Website Intel ─────────────────────────────────────────────
+        stored_intel = deal.get("website_intel")
+        has_intel    = isinstance(stored_intel, dict) and stored_intel.get("status") == "success"
+
+        if not has_intel:
+            website_url = deal.get("company_website") or (
+                "https://" + deal["domain"] if deal.get("domain") else ""
+            )
+            if website_url:
+                await db._set_pipeline_step(deal_id, "website_extraction", "running")
+                await _website_intel_bg(deal_id, website_url, deal.get("company") or "")
+                deal = await db.get_deal(deal_id) or deal
+                stored_intel = deal.get("website_intel")
+                has_intel    = isinstance(stored_intel, dict) and stored_intel.get("status") == "success"
+            else:
+                await db._set_pipeline_step(deal_id, "website_extraction", "skipped", "no website URL")
+
+        # ── Step 2: ICP Generation ────────────────────────────────────────────
+        await db._set_pipeline_step(deal_id, "icp_generation", "running")
+        prospect = ProspectData(
+            name         = deal.get("name", ""),
+            email        = deal.get("email", ""),
+            company      = deal.get("company", ""),
+            domain       = deal.get("domain", ""),
+            website      = deal.get("company_website", ""),
+            job_title    = deal.get("job_title", ""),
+            job_level    = deal.get("job_level", ""),
+            location     = deal.get("location", ""),
+            headcount    = deal.get("headcount", ""),
+            industry     = deal.get("industry", ""),
+            sub_industry = deal.get("sub_industry", ""),
+            description  = deal.get("company_desc", ""),
+            headline     = deal.get("headline", ""),
+            department   = deal.get("department", ""),
+        )
+        existing_wi = stored_intel if isinstance(stored_intel, dict) else None
+        segments    = await generate_icp_segments(
+            prospect,
+            deal.get("reply_body") or "",
+            deal_id                = deal_id,
+            existing_website_intel = existing_wi,
+        )
+        await db.set_deal_icp(deal_id, {"segments": segments})
+        await db.advance_deal_stage(deal_id, "icp")
+        await db._set_pipeline_step(deal_id, "icp_generation", "done", f"{len(segments)} segments")
+        logger.info("Agent 6 step 2 (ICP) complete for deal %s: %d segments", deal_id, len(segments))
+
+        # ── Step 3: Leads → Email → Follow-ups ───────────────────────────────
+        deal = await db.get_deal(deal_id) or deal
         result = await run_auto_pipeline(deal_id, deal, auto_send=auto_send)
         logger.info(
             "Agent 6 (pipeline) complete for deal %s — leads=%d sent=%s",
             deal_id, result.get("lead_count", 0), result.get("sent"),
         )
+
     except Exception:
         logger.exception("Agent 6 (pipeline) failed for deal %s", deal_id)
+        await db._set_pipeline_step(deal_id, "icp_generation", "error", "Pipeline failed — check logs")
 
 
 # ── Agents Lab helpers ────────────────────────────────────────────────────────
