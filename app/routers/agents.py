@@ -622,6 +622,7 @@ async def create_test_deal(body: dict):
             return {
                 "deal_id": existing["id"],
                 "created": False,
+                "reset":   True,
                 "message": f"Deal reset — ready for a fresh run ({existing.get('company') or email})",
             }
         return {
