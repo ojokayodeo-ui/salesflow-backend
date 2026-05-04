@@ -698,7 +698,7 @@ async def debug_apollo_connection():
         "page":     1,
         "person_titles[]":        ["Managing Director", "CEO", "Founder"],
         "person_locations[]":     ["United Kingdom"],
-        "contact_email_status[]": ["verified"],
+        "contact_email_status[]": ["verified", "likely_to_engage"],
     }
     headers = {
         "Content-Type":  "application/json",

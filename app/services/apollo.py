@@ -39,7 +39,7 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
         "page": 1,
         "person_titles[]": titles,
         "person_locations[]": [country],
-        "contact_email_status[]": ["verified"],
+        "contact_email_status[]": ["verified", "likely_to_engage"],
     }
 
     # Only add employee range if it's reasonable
@@ -96,7 +96,7 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
 
         leads = _extract_leads(people)
 
-        # Retry 1: drop employee range if no results
+        # Retry: drop employee range if no results
         if not leads and (emp_min or emp_max):
             logger.info("Apollo: retrying without employee range")
             payload.pop("organization_num_employees_ranges[]", None)
@@ -107,20 +107,6 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
             people = data.get("people", [])
             total  = data.get("pagination", {}).get("total_entries", 0)
             leads  = _extract_leads(people)
-
-        # Retry 2: broaden to likely_to_engage if verified alone returns nothing
-        if not leads:
-            logger.info("Apollo: no verified emails found — retrying with likely_to_engage")
-            payload["contact_email_status[]"] = ["verified", "likely_to_engage"]
-            payload.pop("organization_num_employees_ranges[]", None)
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(APOLLO_SEARCH_URL, json=payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-            people = data.get("people", [])
-            total  = data.get("pagination", {}).get("total_entries", 0)
-            leads  = _extract_leads(people)
-            logger.info("Apollo likely_to_engage retry: %d leads", len(leads))
 
         logger.info("Apollo: %d leads with valid emails (catch_all excluded)", len(leads))
 

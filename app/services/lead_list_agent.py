@@ -116,12 +116,35 @@ async def _execute_apollo_search(
     Execute a real Apollo.io API search.
     Returns (leads_with_email, total_available).
     """
+    def _extract(people: list) -> list:
+        out = []
+        for p in people:
+            email = (p.get("email") or "").strip()
+            if not email:
+                continue
+            es = (p.get("email_status") or p.get("contact_email_status") or "").lower()
+            if es == "catch_all":
+                continue
+            out.append({
+                "first_name":   p.get("first_name", ""),
+                "last_name":    p.get("last_name", ""),
+                "full_name":    p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
+                "title":        p.get("title", ""),
+                "email":        email,
+                "company":      (p.get("organization") or {}).get("name", ""),
+                "city":         p.get("city", ""),
+                "country":      p.get("country", ""),
+                "linkedin_url": p.get("linkedin_url", ""),
+            })
+        return out
+
+    # Start broad: verified + likely_to_engage (excludes catch_all and unavailable)
     payload: dict = {
         "per_page": min(limit, 50),
         "page": 1,
         "person_titles[]":        person_titles[:5],
         "person_locations[]":     person_locations,
-        "contact_email_status[]": ["verified"],
+        "contact_email_status[]": ["verified", "likely_to_engage"],
     }
 
     if employee_min and employee_max and 0 < employee_min < employee_max <= 50000:
@@ -143,28 +166,9 @@ async def _execute_apollo_search(
 
     people = data.get("people", [])
     total  = data.get("pagination", {}).get("total_entries", 0)
+    leads  = _extract(people)
 
-    leads = []
-    for p in people:
-        email = (p.get("email") or "").strip()
-        if not email:
-            continue
-        email_status = (p.get("email_status") or p.get("contact_email_status") or "").lower()
-        if email_status == "catch_all":
-            continue
-        leads.append({
-            "first_name":   p.get("first_name", ""),
-            "last_name":    p.get("last_name", ""),
-            "full_name":    p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
-            "title":        p.get("title", ""),
-            "email":        email,
-            "company":      (p.get("organization") or {}).get("name", ""),
-            "city":         p.get("city", ""),
-            "country":      p.get("country", ""),
-            "linkedin_url": p.get("linkedin_url", ""),
-        })
-
-    # Retry without employee range if zero results
+    # Retry 1: drop employee range
     if not leads and (employee_min or employee_max):
         logger.info("Apollo: zero results with employee filter — retrying without")
         payload.pop("organization_num_employees_ranges[]", None)
@@ -174,25 +178,21 @@ async def _execute_apollo_search(
             data = resp.json()
         people = data.get("people", [])
         total  = data.get("pagination", {}).get("total_entries", 0)
-        for p in people:
-            email = (p.get("email") or "").strip()
-            if not email:
-                continue
-            email_status = (p.get("email_status") or p.get("contact_email_status") or "").lower()
-            if email_status == "catch_all":
-                continue
-            leads.append({
-                "first_name":   p.get("first_name", ""),
-                "last_name":    p.get("last_name", ""),
-                "full_name":    p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
-                "title":        p.get("title", ""),
-                "email":        email,
-                "company":      (p.get("organization") or {}).get("name", ""),
-                "city":         p.get("city", ""),
-                "country":      p.get("country", ""),
-                "linkedin_url": p.get("linkedin_url", ""),
-            })
+        leads  = _extract(people)
 
+    # Retry 2: drop keywords too
+    if not leads and keywords:
+        logger.info("Apollo: still zero — retrying without keywords")
+        payload.pop("q_organization_keyword_tags[]", None)
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(APOLLO_SEARCH_URL, json=payload, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+        people = data.get("people", [])
+        total  = data.get("pagination", {}).get("total_entries", 0)
+        leads  = _extract(people)
+
+    logger.info("Apollo agentic search: %d leads (total available: %s)", len(leads), total)
     return leads, total
 
 
@@ -259,7 +259,8 @@ STRATEGY:
 - After searching your chosen segments, call finalize_leads with your summary.
 
 QUALITY RULES:
-- Only verified email contacts count (Apollo handles this — confirmed=verified in the API).
+- Contacts with verified OR likely_to_engage email status are included (catch_all excluded automatically).
+- If a search returns 0 results, retry with fewer filters: first remove keywords, then remove employee range.
 - Prioritise relevance over volume. A tight list of 80 well-targeted leads beats 200 generic ones.
 - If results for a segment are poor (wrong titles, irrelevant companies) after retry, skip it and note why.
 
