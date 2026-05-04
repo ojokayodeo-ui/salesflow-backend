@@ -742,6 +742,14 @@ CREATE TABLE IF NOT EXISTS pipeline_config (
 )
 """
 
+CREATE_AGENT_CONFIGS = """
+CREATE TABLE IF NOT EXISTS agent_configs (
+    agent_id        TEXT PRIMARY KEY,
+    training_notes  TEXT NOT NULL DEFAULT '',
+    updated_at      TEXT NOT NULL
+)
+"""
+
 
 async def ensure_extra_tables():
     pool = await get_pool()
@@ -762,6 +770,7 @@ async def ensure_extra_tables():
                ON CONFLICT (id) DO NOTHING""",
             now_iso(),
         )
+        await conn.execute(CREATE_AGENT_CONFIGS)
     logger.info("Extra tables ready")
 
 
@@ -791,6 +800,30 @@ async def save_pipeline_config(lead_count: int, send_delay_seconds: int) -> dict
             lead_count, send_delay_seconds, now_iso(),
         )
     return {"lead_count": lead_count, "send_delay_seconds": send_delay_seconds}
+
+
+# ── Agent Configs (persistent per-agent training notes) ──────────────────────
+
+async def get_all_agent_configs() -> dict:
+    """Return all agent training notes as {agent_id: training_notes}."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT agent_id, training_notes FROM agent_configs")
+    return {row["agent_id"]: row["training_notes"] for row in rows}
+
+
+async def save_agent_config(agent_id: str, training_notes: str) -> dict:
+    """Upsert training notes for a single agent."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO agent_configs (agent_id, training_notes, updated_at)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (agent_id) DO UPDATE
+               SET training_notes=$2, updated_at=$3""",
+            agent_id, training_notes.strip(), now_iso(),
+        )
+    return {"agent_id": agent_id, "training_notes": training_notes.strip()}
 
 
 # ── Notes ────────────────────────────────────────────────────────────────────

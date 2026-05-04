@@ -795,3 +795,23 @@ async def debug_perplexity_connection():
         return {"ok": False, "error": "No result returned from Perplexity"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+# ── Agent Configs (persistent training notes) ─────────────────────────────────
+
+@router.get("/configs")
+async def get_agent_configs():
+    """Return all saved agent training notes."""
+    configs = await db.get_all_agent_configs()
+    return {"configs": configs}
+
+
+@router.post("/configs/{agent_id}")
+async def save_agent_config(agent_id: str, body: dict = {}):
+    """Save training notes for a specific agent."""
+    valid_ids = {"website-intel", "icp", "leads", "email", "followups", "pipeline"}
+    if agent_id not in valid_ids:
+        raise HTTPException(status_code=400, detail=f"Unknown agent: {agent_id}")
+    training_notes = body.get("training_notes", "")
+    result = await db.save_agent_config(agent_id, training_notes)
+    return result
