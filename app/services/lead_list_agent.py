@@ -126,7 +126,7 @@ async def _execute_apollo_search(
         "page":                   1,
         "person_titles[]":        person_titles[:5],
         "person_locations[]":     person_locations,
-        "contact_email_status[]": ["verified", "likely_to_engage"],
+        "contact_email_status[]": ["verified"],
     }
 
     if employee_min and employee_max and 0 < employee_min < employee_max <= 50000:
@@ -232,7 +232,7 @@ STRATEGY:
 - After searching your chosen segments, call finalize_leads with your summary.
 
 QUALITY RULES:
-- Contacts with verified OR likely_to_engage email status are included (catch_all excluded automatically).
+- Only contacts with VERIFIED email status are included. Catch-all, unverified, and likely_to_engage are all excluded.
 - If a search returns 0 results, retry with fewer filters: first remove keywords, then remove employee range.
 - Prioritise relevance over volume. A tight list of 80 well-targeted leads beats 200 generic ones.
 - If results for a segment are poor (wrong titles, irrelevant companies) after retry, skip it and note why.

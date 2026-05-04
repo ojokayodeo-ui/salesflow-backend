@@ -36,7 +36,7 @@ def _build_lead(p: dict) -> dict | None:
     if not email:
         return None
     es = (p.get("email_status") or "").lower()
-    if es == "catch_all":
+    if es not in ("verified", ""):
         return None
 
     # Apollo returns org data under "organization" (search) or "employment_history"
@@ -223,7 +223,7 @@ async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
         "page":                   1,
         "person_titles[]":        titles,
         "person_locations[]":     [country],
-        "contact_email_status[]": ["verified", "likely_to_engage"],
+        "contact_email_status[]": ["verified"],
     }
     if emp_min > 0 and emp_max > 0 and emp_max <= 10000:
         payload["organization_num_employees_ranges[]"] = [f"{emp_min},{emp_max}"]
