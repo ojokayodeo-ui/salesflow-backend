@@ -604,6 +604,26 @@ async def create_test_deal(body: dict):
 
     existing = await db.get_deal_by_email(email)
     if existing:
+        force_reset = body.get("force_reset", False)
+        if force_reset:
+            # Wipe all agent outputs so the deal can be run fresh
+            pool = await db.get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE deals
+                       SET website_intel=NULL, icp_data=NULL, leads=NULL,
+                           delivery_email=NULL, follow_ups=NULL,
+                           pipeline_status=NULL, pipeline_steps=NULL,
+                           stage='new', updated_at=$1
+                       WHERE id=$2""",
+                    db.now_iso(), existing["id"],
+                )
+            logger.info("Test deal %s reset for fresh run", existing["id"])
+            return {
+                "deal_id": existing["id"],
+                "created": False,
+                "message": f"Deal reset — ready for a fresh run ({existing.get('company') or email})",
+            }
         return {
             "deal_id": existing["id"],
             "created": False,
