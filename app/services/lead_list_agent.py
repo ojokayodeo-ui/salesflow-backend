@@ -116,32 +116,14 @@ async def _execute_apollo_search(
     Execute a real Apollo.io API search.
     Returns (leads_with_email, total_available).
     """
-    def _extract(people: list) -> list:
-        out = []
-        for p in people:
-            email = (p.get("email") or "").strip()
-            if not email:
-                continue
-            es = (p.get("email_status") or p.get("contact_email_status") or "").lower()
-            if es == "catch_all":
-                continue
-            out.append({
-                "first_name":   p.get("first_name", ""),
-                "last_name":    p.get("last_name", ""),
-                "full_name":    p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
-                "title":        p.get("title", ""),
-                "email":        email,
-                "company":      (p.get("organization") or {}).get("name", ""),
-                "city":         p.get("city", ""),
-                "country":      p.get("country", ""),
-                "linkedin_url": p.get("linkedin_url", ""),
-            })
-        return out
+    from app.services.apollo import _make_headers, _apollo_search, _build_lead
 
-    # Start broad: verified + likely_to_engage (excludes catch_all and unavailable)
+    headers = _make_headers()
+
+    # Start broad: verified + likely_to_engage; reveal emails via people/match
     payload: dict = {
-        "per_page": min(limit, 50),
-        "page": 1,
+        "per_page":               min(limit, 50),
+        "page":                   1,
         "person_titles[]":        person_titles[:5],
         "person_locations[]":     person_locations,
         "contact_email_status[]": ["verified", "likely_to_engage"],
@@ -153,46 +135,21 @@ async def _execute_apollo_search(
     if keywords:
         payload["q_organization_keyword_tags[]"] = keywords[:5]
 
-    headers = {
-        "Content-Type":  "application/json",
-        "X-Api-Key":     settings.apollo_api_key,
-        "Cache-Control": "no-cache",
-    }
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(APOLLO_SEARCH_URL, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-
-    people = data.get("people", [])
-    total  = data.get("pagination", {}).get("total_entries", 0)
-    leads  = _extract(people)
+    leads, total = await _apollo_search(payload, headers, max_reveal=limit)
 
     # Retry 1: drop employee range
     if not leads and (employee_min or employee_max):
-        logger.info("Apollo: zero results with employee filter — retrying without")
+        logger.info("Apollo agentic: retrying without employee range")
         payload.pop("organization_num_employees_ranges[]", None)
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(APOLLO_SEARCH_URL, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-        people = data.get("people", [])
-        total  = data.get("pagination", {}).get("total_entries", 0)
-        leads  = _extract(people)
+        leads, total = await _apollo_search(payload, headers, max_reveal=limit)
 
     # Retry 2: drop keywords too
     if not leads and keywords:
-        logger.info("Apollo: still zero — retrying without keywords")
+        logger.info("Apollo agentic: retrying without keywords")
         payload.pop("q_organization_keyword_tags[]", None)
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(APOLLO_SEARCH_URL, json=payload, headers=headers)
-            resp.raise_for_status()
-            data = resp.json()
-        people = data.get("people", [])
-        total  = data.get("pagination", {}).get("total_entries", 0)
-        leads  = _extract(people)
+        leads, total = await _apollo_search(payload, headers, max_reveal=limit)
 
-    logger.info("Apollo agentic search: %d leads (total available: %s)", len(leads), total)
+    logger.info("Apollo agentic search complete: %d leads (total available: %s)", len(leads), total)
     return leads, total
 
 

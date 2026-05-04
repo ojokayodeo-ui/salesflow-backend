@@ -1,8 +1,16 @@
 """
 Apollo.io Lead Search Service
-API confirmed working - uses verified broad search parameters.
+
+Two-step flow:
+  1. Search  — POST /api/v1/mixed_people/api_search  → returns people (often no email)
+  2. Reveal  — POST /api/v1/people/match per person   → reveals email using export credits
+
+Apollo's search endpoint only returns emails for contacts already exported from your
+account. For new contacts the email field is null. The reveal step consumes 1 export
+credit per contact and returns the actual email address.
 """
 
+import asyncio
 import logging
 import httpx
 from app.config import settings
@@ -11,105 +19,173 @@ from app.models.schemas import ICPData
 logger = logging.getLogger(__name__)
 
 APOLLO_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
+APOLLO_MATCH_URL  = "https://api.apollo.io/api/v1/people/match"
+
+
+def _make_headers() -> dict:
+    return {
+        "Content-Type":  "application/json",
+        "X-Api-Key":     settings.apollo_api_key,
+        "Cache-Control": "no-cache",
+    }
+
+
+def _build_lead(p: dict) -> dict | None:
+    """Convert raw Apollo person dict to our lead dict. Returns None if no email."""
+    email = (p.get("email") or "").strip()
+    if not email:
+        return None
+    es = (p.get("email_status") or "").lower()
+    if es == "catch_all":
+        return None
+    return {
+        "first_name":   p.get("first_name", ""),
+        "last_name":    p.get("last_name", ""),
+        "full_name":    p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
+        "title":        p.get("title", ""),
+        "email":        email,
+        "company":      (p.get("organization") or {}).get("name", ""),
+        "city":         p.get("city", ""),
+        "country":      p.get("country", ""),
+        "linkedin_url": p.get("linkedin_url", ""),
+    }
+
+
+async def _reveal_email(person: dict, headers: dict) -> dict | None:
+    """
+    Call Apollo's people/match endpoint to reveal a single contact's email.
+    Uses 1 export credit. Returns updated person dict with email, or None on failure.
+    """
+    pid = person.get("id") or person.get("person_id")
+    linkedin = person.get("linkedin_url", "")
+
+    if not pid and not linkedin:
+        return None
+
+    payload: dict = {"reveal_personal_emails": True, "reveal_phone_number": False}
+    if pid:
+        payload["id"] = pid
+    elif linkedin:
+        payload["linkedin_url"] = linkedin
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(APOLLO_MATCH_URL, json=payload, headers=headers)
+            if resp.status_code not in (200, 201):
+                return None
+            data = resp.json()
+        matched = data.get("person") or data
+        email = (matched.get("email") or "").strip()
+        if not email:
+            return None
+        # Merge email back onto original person dict
+        enriched = dict(person)
+        enriched["email"]        = email
+        enriched["email_status"] = matched.get("email_status", "")
+        return enriched
+    except Exception as exc:
+        logger.debug("Email reveal failed for %s: %s", pid or linkedin, exc)
+        return None
+
+
+async def _reveal_emails_batch(
+    people: list[dict],
+    headers: dict,
+    max_reveal: int = 30,
+) -> list[dict]:
+    """
+    For each person in `people` that has no email, call _reveal_email to get it.
+    Runs reveals concurrently (up to max_reveal contacts) to stay fast.
+    Returns updated list — contacts still missing emails are dropped.
+    """
+    need_reveal = [p for p in people if not (p.get("email") or "").strip()][:max_reveal]
+    already_have = [p for p in people if (p.get("email") or "").strip()]
+
+    if not need_reveal:
+        return already_have
+
+    logger.info("Apollo: revealing emails for %d contacts (using export credits)", len(need_reveal))
+
+    tasks = [_reveal_email(p, headers) for p in need_reveal]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    revealed = []
+    for r in results:
+        if isinstance(r, dict) and (r.get("email") or "").strip():
+            revealed.append(r)
+
+    logger.info(
+        "Apollo email reveal: %d/%d contacts got emails",
+        len(revealed), len(need_reveal),
+    )
+    return already_have + revealed
+
+
+async def _apollo_search(
+    payload: dict,
+    headers: dict,
+    max_reveal: int = 30,
+) -> tuple[list[dict], int]:
+    """
+    Execute one Apollo search and reveal emails for contacts that don't have them.
+    Returns (people_with_emails, total_available).
+    """
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(APOLLO_SEARCH_URL, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    people = data.get("people", [])
+    total  = data.get("pagination", {}).get("total_entries", 0)
+    logger.info("Apollo search: %d people returned (total available: %s)", len(people), total)
+
+    if not people:
+        return [], total
+
+    # Reveal emails for contacts that don't have one yet
+    people = await _reveal_emails_batch(people, headers, max_reveal=max_reveal)
+
+    leads = [l for l in (_build_lead(p) for p in people) if l]
+    return leads, total
 
 
 async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
     """
-    Search Apollo.io for verified contacts matching the ICP.
-    Uses broad parameters confirmed working via debug endpoint.
+    Search Apollo.io for contacts matching the ICP and reveal their emails.
     """
     if not settings.apollo_api_key:
         logger.warning("APOLLO_API_KEY not set — skipping lead search")
         return []
 
-    # Use top 3 titles from ICP, fall back to common titles
-    titles = (icp.target_titles or [])[:3]
-    if not titles:
-        titles = ["Managing Director", "CEO", "Founder"]
-
-    # Country from ICP
+    titles  = (icp.target_titles or [])[:3] or ["Managing Director", "CEO", "Founder"]
     country = icp.hq_country or "United Kingdom"
-
-    # Build payload — confirmed working format
     emp_min = icp.apollo_employee_min or 0
     emp_max = icp.apollo_employee_max or 0
 
     payload = {
-        "per_page": min(limit, 100),
-        "page": 1,
-        "person_titles[]": titles,
-        "person_locations[]": [country],
+        "per_page":               min(limit, 50),
+        "page":                   1,
+        "person_titles[]":        titles,
+        "person_locations[]":     [country],
         "contact_email_status[]": ["verified", "likely_to_engage"],
     }
-
-    # Only add employee range if it's reasonable
     if emp_min > 0 and emp_max > 0 and emp_max <= 10000:
         payload["organization_num_employees_ranges[]"] = [f"{emp_min},{emp_max}"]
 
-    logger.info(
-        "Apollo search — titles: %s | country: %s | employees: %s",
-        titles, country,
-        f"{emp_min}-{emp_max}" if emp_min and emp_max else "any",
-    )
-
-    headers = {
-        "Content-Type": "application/json",
-        "X-Api-Key": settings.apollo_api_key,
-        "Cache-Control": "no-cache",
-    }
-
-    def _extract_leads(people: list) -> list:
-        result = []
-        for p in people:
-            email = (p.get("email") or "").strip()
-            if not email:
-                continue
-            email_status = (p.get("email_status") or p.get("contact_email_status") or "").lower()
-            if email_status == "catch_all":
-                continue
-            result.append({
-                "first_name":   p.get("first_name", ""),
-                "last_name":    p.get("last_name", ""),
-                "full_name":    p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
-                "title":        p.get("title", ""),
-                "email":        email,
-                "company":      (p.get("organization") or {}).get("name", ""),
-                "city":         p.get("city", ""),
-                "country":      p.get("country", ""),
-                "linkedin_url": p.get("linkedin_url", ""),
-            })
-        return result
+    headers = _make_headers()
+    logger.info("Apollo search — titles: %s | country: %s | employees: %s-%s",
+                titles, country, emp_min or "any", emp_max or "any")
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                APOLLO_SEARCH_URL,
-                json=payload,
-                headers=headers,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        leads, _ = await _apollo_search(payload, headers, max_reveal=min(limit, 30))
 
-        people = data.get("people", [])
-        total = data.get("pagination", {}).get("total_entries", 0)
-        logger.info("Apollo: %d people returned (total available: %s)", len(people), total)
-
-        leads = _extract_leads(people)
-
-        # Retry: drop employee range if no results
+        # Retry without employee range if still nothing
         if not leads and (emp_min or emp_max):
             logger.info("Apollo: retrying without employee range")
             payload.pop("organization_num_employees_ranges[]", None)
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(APOLLO_SEARCH_URL, json=payload, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
-            people = data.get("people", [])
-            total  = data.get("pagination", {}).get("total_entries", 0)
-            leads  = _extract_leads(people)
+            leads, _ = await _apollo_search(payload, headers, max_reveal=min(limit, 30))
 
-        logger.info("Apollo: %d leads with valid emails (catch_all excluded)", len(leads))
-
+        logger.info("Apollo: %d leads with emails", len(leads))
         return leads[:limit]
 
     except httpx.HTTPStatusError as exc:
@@ -146,7 +222,6 @@ def leads_to_csv(leads: list[dict]) -> str:
 
     valid_raws = [r for r in raw_rows if r]
     if valid_raws:
-        # Use the column order from the first row that has raw data
         fieldnames = list(valid_raws[0].keys())
         out = _io.StringIO()
         writer = _csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore", lineterminator="\n")
@@ -155,7 +230,6 @@ def leads_to_csv(leads: list[dict]) -> str:
             if raw_rows[i]:
                 writer.writerow(raw_rows[i])
             else:
-                # Lead has no raw data — map what we have into the known columns
                 fallback = {k: "" for k in fieldnames}
                 for key, val in {
                     "first_name": lead.get("first_name", ""),
@@ -167,7 +241,6 @@ def leads_to_csv(leads: list[dict]) -> str:
                     "country":    lead.get("country", ""),
                     "linkedin_url": lead.get("linkedin_url", ""),
                 }.items():
-                    # Case-insensitive match against fieldnames
                     for fn in fieldnames:
                         if fn.lower().replace(" ", "_") == key:
                             fallback[fn] = val

@@ -708,27 +708,38 @@ async def debug_apollo_connection():
     try:
         async with _httpx.AsyncClient(timeout=20) as client:
             resp = await client.post(APOLLO_URL, json=payload, headers=headers)
+        if resp.status_code != 200:
+            return {"ok": False, "http_status": resp.status_code, "error": resp.text[:300]}
         raw = resp.json()
         people = raw.get("people", [])
+        before_email = sum(1 for p in people if p.get("email"))
+
+        # Run the reveal step so the Test button shows post-reveal results
+        from app.services.apollo import _make_headers, _reveal_emails_batch, _build_lead
+        if people:
+            people = await _reveal_emails_batch(people, headers, max_reveal=3)
+
+        after_email = sum(1 for p in people if p.get("email"))
         sample = []
-        for p in people[:3]:
+        for p in people[:5]:
             sample.append({
                 "name":         p.get("name"),
                 "title":        p.get("title"),
-                "email":        p.get("email"),
-                "email_status": p.get("email_status"),
-                "contact_email_status": p.get("contact_email_status"),
+                "email":        p.get("email") or None,
+                "email_status": p.get("email_status") or "—",
                 "city":         p.get("city"),
                 "country":      p.get("country"),
             })
         return {
-            "ok":            resp.status_code == 200,
-            "http_status":   resp.status_code,
-            "total_entries": raw.get("pagination", {}).get("total_entries", 0),
-            "people_returned": len(people),
-            "people_with_email": sum(1 for p in people if p.get("email")),
-            "sample":        sample,
-            "api_key_prefix": settings.apollo_api_key[:6] + "..." if settings.apollo_api_key else "",
+            "ok":                    True,
+            "http_status":           resp.status_code,
+            "total_entries":         raw.get("pagination", {}).get("total_entries", 0),
+            "people_returned":       len(people),
+            "people_with_email_before_reveal": before_email,
+            "people_with_email":     after_email,
+            "reveal_step_working":   after_email > before_email,
+            "sample":                sample,
+            "api_key_prefix":        settings.apollo_api_key[:6] + "..." if settings.apollo_api_key else "",
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
