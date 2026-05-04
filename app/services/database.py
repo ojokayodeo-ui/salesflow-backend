@@ -763,6 +763,7 @@ async def ensure_extra_tables():
         await conn.execute(CREATE_NURTURE_SEQ_STEPS)
         await conn.execute(CREATE_NURTURE_ENROLLMENTS)
         await conn.execute(CREATE_PIPELINE_CONFIG)
+        await conn.execute(CREATE_AGENT_CONFIGS)
         # Seed default row if table is empty
         await conn.execute(
             """INSERT INTO pipeline_config (id, lead_count, send_delay_seconds, updated_at)
@@ -770,7 +771,6 @@ async def ensure_extra_tables():
                ON CONFLICT (id) DO NOTHING""",
             now_iso(),
         )
-        await conn.execute(CREATE_AGENT_CONFIGS)
     logger.info("Extra tables ready")
 
 

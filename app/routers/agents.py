@@ -611,13 +611,13 @@ async def create_test_deal(body: dict):
             async with pool.acquire() as conn:
                 await conn.execute(
                     """UPDATE deals
-                       SET website_intel=NULL, icp_data=NULL, leads=NULL,
-                           delivery_email=NULL, follow_ups=NULL,
-                           pipeline_status=NULL, pipeline_steps=NULL,
+                       SET website_intel=NULL, icp_json=NULL,
+                           pipeline_status=NULL, followup_draft=NULL,
                            stage='new', updated_at=$1
                        WHERE id=$2""",
                     db.now_iso(), existing["id"],
                 )
+                await conn.execute("DELETE FROM leads WHERE deal_id=$1", existing["id"])
             logger.info("Test deal %s reset for fresh run", existing["id"])
             return {
                 "deal_id": existing["id"],
@@ -747,8 +747,8 @@ async def debug_apollo_connection():
     payload = {
         "per_page": 5,
         "page":     1,
-        "person_titles[]":        ["Managing Director", "CEO", "Founder"],
-        "person_locations[]":     ["United Kingdom"],
+        "person_titles[]": ["Managing Director", "CEO", "Founder"],
+        "person_locations[]": ["United Kingdom"],
         "contact_email_status[]": ["verified", "likely_to_engage"],
     }
     headers = {
