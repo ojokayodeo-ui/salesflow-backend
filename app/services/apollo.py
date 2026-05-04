@@ -39,9 +39,31 @@ def _build_lead(p: dict) -> dict | None:
     if es == "catch_all":
         return None
 
-    org    = p.get("organization") or {}
+    # Apollo returns org data under "organization" (search) or "employment_history"
+    # The reveal response may also put current org data directly on the person.
+    org = p.get("organization") or {}
+
+    # If org is sparse, try to supplement from account/company fields on person
+    if not org.get("website_url"):
+        org = dict(org)
+        org["website_url"]             = p.get("company_website_url") or p.get("website_url") or ""
+        org["linkedin_url"]            = org.get("linkedin_url") or p.get("company_linkedin_url") or ""
+        org["industry"]                = org.get("industry") or p.get("industry") or ""
+        org["estimated_num_employees"] = (org.get("estimated_num_employees")
+                                          or p.get("num_employees")
+                                          or p.get("company_size"))
+        org["founded_year"]            = org.get("founded_year") or p.get("founded_year") or ""
+
     phones = p.get("phone_numbers") or []
-    phone  = phones[0].get("sanitized_number", "") if phones else ""
+    # phone_numbers is a list of dicts; also check sanitized_number and raw_number
+    phone = ""
+    for ph in phones:
+        phone = ph.get("sanitized_number") or ph.get("raw_number") or ""
+        if phone:
+            break
+    # Fallback: some reveal responses put the number directly on person
+    if not phone:
+        phone = p.get("phone_number") or p.get("direct_phone") or ""
 
     return {
         "first_name":        p.get("first_name", ""),
@@ -58,7 +80,7 @@ def _build_lead(p: dict) -> dict | None:
         "city":              p.get("city", ""),
         "state":             p.get("state", ""),
         "country":           p.get("country", ""),
-        "company":           org.get("name", ""),
+        "company":           org.get("name", "") or p.get("company_name", ""),
         "company_website":   org.get("website_url", ""),
         "company_linkedin":  org.get("linkedin_url", ""),
         "company_industry":  org.get("industry", ""),
@@ -71,7 +93,8 @@ def _build_lead(p: dict) -> dict | None:
 async def _reveal_email(person: dict, headers: dict) -> dict | None:
     """
     Call Apollo's people/match endpoint to reveal a single contact's email.
-    Uses 1 export credit. Returns updated person dict with email, or None on failure.
+    Uses 1 export credit. Returns enriched person dict with email + all available
+    fields from the reveal response merged in (org data, phone, linkedin, etc.).
     """
     pid = person.get("id") or person.get("person_id")
     linkedin = person.get("linkedin_url", "")
@@ -79,7 +102,7 @@ async def _reveal_email(person: dict, headers: dict) -> dict | None:
     if not pid and not linkedin:
         return None
 
-    payload: dict = {"reveal_personal_emails": True, "reveal_phone_number": False}
+    payload: dict = {"reveal_personal_emails": True, "reveal_phone_number": True}
     if pid:
         payload["id"] = pid
     elif linkedin:
@@ -95,8 +118,15 @@ async def _reveal_email(person: dict, headers: dict) -> dict | None:
         email = (matched.get("email") or "").strip()
         if not email:
             return None
-        # Merge email back onto original person dict
+
+        # Start from the original search person, then overlay all non-empty
+        # fields from the reveal response — the reveal returns richer data
         enriched = dict(person)
+        for key, val in matched.items():
+            if val is not None and val != "" and val != [] and val != {}:
+                enriched[key] = val
+
+        # Always trust the reveal's email and status
         enriched["email"]        = email
         enriched["email_status"] = matched.get("email_status", "")
         return enriched
@@ -158,6 +188,15 @@ async def _apollo_search(
 
     if not people:
         return [], total
+
+    # Log what fields the first person actually has so we can debug field mapping
+    if people:
+        sample = people[0]
+        org_keys = list((sample.get("organization") or {}).keys())
+        logger.debug(
+            "Apollo sample person keys: %s | org keys: %s",
+            list(sample.keys()), org_keys,
+        )
 
     # Reveal emails for contacts that don't have one yet
     people = await _reveal_emails_batch(people, headers, max_reveal=max_reveal)
