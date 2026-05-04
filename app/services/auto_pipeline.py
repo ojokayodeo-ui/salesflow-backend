@@ -110,6 +110,7 @@ async def generate_delivery_email(
     reply: str,
     lead_count: int,
     website_intel: dict | None = None,
+    training_notes: str = "",
 ) -> dict:
     """
     Generate a personalised lead delivery email using Claude.
@@ -138,6 +139,11 @@ async def generate_delivery_email(
         if parts:
             wi_insight = "Website intelligence extracted:\n" + "\n".join(parts)
 
+    training_block = (
+        f"\n\nADDITIONAL INSTRUCTIONS FROM USER:\n{training_notes.strip()}"
+        if training_notes and training_notes.strip() else ""
+    )
+
     prompt = f"""Write a professional lead delivery email from {sender} to {first_name} at {prospect.company}.
 
 Context (use ONLY this data - no hallucination):
@@ -162,7 +168,7 @@ Write an email that:
 6. Sign off as {sender}
 7. NEVER use em dashes. Use a hyphen (-) or rewrite the sentence.
 8. No placeholder text. No square brackets. Everything must be complete and real.
-
+{training_block}
 Return ONLY the email body. No subject line."""
 
     try:
@@ -333,6 +339,8 @@ async def run_auto_pipeline(
     deal_id:   str,
     deal:      dict,
     auto_send: bool = False,
+    training_notes: str = "",
+    lead_count_override=None,
 ) -> dict:
     """
     Full pipeline for a deal that has ICP segments.
@@ -427,7 +435,7 @@ async def run_auto_pipeline(
     if settings.apollo_api_key:
         try:
             cfg = await db.get_pipeline_config()
-            lead_limit = cfg["lead_count"]
+            lead_limit = int(lead_count_override) if lead_count_override else cfg["lead_count"]
             leads = await search_leads_across_segments(segments, total_limit=lead_limit)
             result["leads"]      = leads
             result["lead_count"] = len(leads)
@@ -455,6 +463,7 @@ async def run_auto_pipeline(
         delivery = await generate_delivery_email(
             prospect, segments, reply, result["lead_count"],
             website_intel=website_intel if isinstance(website_intel, dict) else None,
+            training_notes=training_notes,
         )
         result["delivery_email"] = delivery
         result["steps"]["email_draft"] = {"status": "ok"}

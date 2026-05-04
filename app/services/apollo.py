@@ -38,16 +38,33 @@ def _build_lead(p: dict) -> dict | None:
     es = (p.get("email_status") or "").lower()
     if es == "catch_all":
         return None
+
+    org    = p.get("organization") or {}
+    phones = p.get("phone_numbers") or []
+    phone  = phones[0].get("sanitized_number", "") if phones else ""
+
     return {
-        "first_name":   p.get("first_name", ""),
-        "last_name":    p.get("last_name", ""),
-        "full_name":    p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
-        "title":        p.get("title", ""),
-        "email":        email,
-        "company":      (p.get("organization") or {}).get("name", ""),
-        "city":         p.get("city", ""),
-        "country":      p.get("country", ""),
-        "linkedin_url": p.get("linkedin_url", ""),
+        "first_name":        p.get("first_name", ""),
+        "last_name":         p.get("last_name", ""),
+        "full_name":         p.get("name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip(),
+        "title":             p.get("title", ""),
+        "seniority":         p.get("seniority", ""),
+        "departments":       ", ".join(p.get("departments") or []),
+        "email":             email,
+        "email_status":      p.get("email_status", ""),
+        "phone":             phone,
+        "linkedin_url":      p.get("linkedin_url", ""),
+        "twitter_url":       p.get("twitter_url", ""),
+        "city":              p.get("city", ""),
+        "state":             p.get("state", ""),
+        "country":           p.get("country", ""),
+        "company":           org.get("name", ""),
+        "company_website":   org.get("website_url", ""),
+        "company_linkedin":  org.get("linkedin_url", ""),
+        "company_industry":  org.get("industry", ""),
+        "company_employees": str(org.get("estimated_num_employees") or org.get("num_employees") or ""),
+        "company_founded":   str(org.get("founded_year") or ""),
+        "apollo_id":         p.get("id", ""),
     }
 
 
@@ -206,7 +223,7 @@ def leads_to_csv(leads: list[dict]) -> str:
     import csv as _csv, io as _io, json as _json
 
     if not leads:
-        return "First Name,Last Name,Title,Company,Email,City,Country,LinkedIn\n"
+        return "First Name,Last Name,Full Name,Title,Seniority,Departments,Email,Email Status,Phone,LinkedIn,Twitter,City,State,Country,Company,Company Website,Company LinkedIn,Company Industry,Company Employees,Company Founded,Apollo ID\n"
 
     # Attempt to reconstruct from raw_json (user-uploaded CSVs)
     raw_rows = []
@@ -249,22 +266,42 @@ def leads_to_csv(leads: list[dict]) -> str:
         return out.getvalue()
 
     # Fallback: standard fixed columns (Apollo-sourced leads)
+    fieldnames = [
+        "First Name", "Last Name", "Full Name", "Title", "Seniority", "Departments",
+        "Email", "Email Status", "Phone", "LinkedIn", "Twitter",
+        "City", "State", "Country",
+        "Company", "Company Website", "Company LinkedIn", "Company Industry",
+        "Company Employees", "Company Founded", "Apollo ID",
+    ]
+    field_map = {
+        "first_name":        "First Name",
+        "last_name":         "Last Name",
+        "full_name":         "Full Name",
+        "title":             "Title",
+        "seniority":         "Seniority",
+        "departments":       "Departments",
+        "email":             "Email",
+        "email_status":      "Email Status",
+        "phone":             "Phone",
+        "linkedin_url":      "LinkedIn",
+        "twitter_url":       "Twitter",
+        "city":              "City",
+        "state":             "State",
+        "country":           "Country",
+        "company":           "Company",
+        "company_website":   "Company Website",
+        "company_linkedin":  "Company LinkedIn",
+        "company_industry":  "Company Industry",
+        "company_employees": "Company Employees",
+        "company_founded":   "Company Founded",
+        "apollo_id":         "Apollo ID",
+    }
     out = _io.StringIO()
-    writer = _csv.DictWriter(
-        out,
-        fieldnames=["First Name", "Last Name", "Title", "Company", "Email", "City", "Country", "LinkedIn"],
-        lineterminator="\n",
-    )
+    writer = _csv.DictWriter(out, fieldnames=fieldnames, lineterminator="\n")
     writer.writeheader()
     for lead in leads:
-        writer.writerow({
-            "First Name": lead.get("first_name", ""),
-            "Last Name":  lead.get("last_name", ""),
-            "Title":      lead.get("title", ""),
-            "Company":    lead.get("company", ""),
-            "Email":      lead.get("email", ""),
-            "City":       lead.get("city", ""),
-            "Country":    lead.get("country", ""),
-            "LinkedIn":   lead.get("linkedin_url", ""),
-        })
+        row = {col: "" for col in fieldnames}
+        for key, col in field_map.items():
+            row[col] = lead.get(key, "")
+        writer.writerow(row)
     return out.getvalue()

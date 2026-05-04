@@ -27,6 +27,7 @@ async def generate_icp_segments(
     reply_body: str = "",
     deal_id: str = "",
     existing_website_intel: dict | None = None,
+    training_notes: str = "",
 ) -> list[dict]:
     """
     Generate 5 distinct ICP segments for the prospect's business.
@@ -194,6 +195,11 @@ REPLY TEXT:
 {apify_block}
 """.strip()
 
+    training_block = (
+        f"\n\nADDITIONAL INSTRUCTIONS FROM USER:\n{training_notes.strip()}"
+        if training_notes and training_notes.strip() else ""
+    )
+
     prompt = f"""You are a world-class B2B market segmentation expert. Generate 5 sharp, specific, actionable ICP segments for this prospect's outbound sales.
 
 CRITICAL RULES:
@@ -210,7 +216,7 @@ CRITICAL RULES:
 {prospect_context}
 
 Return ONLY valid JSON - no markdown, no explanation, no fences.
-IMPORTANT: Never use em dashes in any text values.
+IMPORTANT: Never use em dashes in any text values.{training_block}
 
 {{
   "segments": [

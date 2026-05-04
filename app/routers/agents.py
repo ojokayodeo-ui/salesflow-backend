@@ -177,7 +177,7 @@ async def _website_intel_bg(deal_id: str, website_url: str, company_name: str):
 # ── Agent 2: ICP Generation ───────────────────────────────────────────────────
 
 @router.post("/icp/{deal_id}")
-async def run_icp_agent(deal_id: str, background_tasks: BackgroundTasks):
+async def run_icp_agent(deal_id: str, background_tasks: BackgroundTasks, body: dict = {}):
     """
     Agent 2 — ICP Generation Agent.
     Generates 5 ICP segments from website intel, Instantly data, and reply context.
@@ -186,7 +186,8 @@ async def run_icp_agent(deal_id: str, background_tasks: BackgroundTasks):
     if not deal:
         raise HTTPException(status_code=404, detail="Deal not found")
 
-    background_tasks.add_task(_icp_bg, deal_id, deal)
+    training_notes = body.get("training_notes", "")
+    background_tasks.add_task(_icp_bg, deal_id, deal, training_notes)
     return {
         "agent":   "icp_generation",
         "queued":  True,
@@ -195,7 +196,7 @@ async def run_icp_agent(deal_id: str, background_tasks: BackgroundTasks):
     }
 
 
-async def _icp_bg(deal_id: str, deal: dict):
+async def _icp_bg(deal_id: str, deal: dict, training_notes: str = ""):
     from app.services.icp import generate_icp_segments
     from app.models.schemas import ProspectData
     try:
@@ -225,8 +226,9 @@ async def _icp_bg(deal_id: str, deal: dict):
         segments = await generate_icp_segments(
             prospect,
             reply,
-            deal_id              = deal_id,
+            deal_id                = deal_id,
             existing_website_intel = existing_wi,
+            training_notes         = training_notes,
         )
         await db.set_deal_icp(deal_id, {"segments": segments})
         await db.advance_deal_stage(deal_id, "icp")
@@ -238,7 +240,7 @@ async def _icp_bg(deal_id: str, deal: dict):
 # ── Agent 3: Lead List (full agentic loop) ────────────────────────────────────
 
 @router.post("/leads/{deal_id}")
-async def run_lead_list_agent(deal_id: str, background_tasks: BackgroundTasks):
+async def run_lead_list_agent(deal_id: str, background_tasks: BackgroundTasks, body: dict = {}):
     """
     Agent 3 — Lead List Generation Agent.
 
@@ -266,7 +268,10 @@ async def run_lead_list_agent(deal_id: str, background_tasks: BackgroundTasks):
             detail="APOLLO_API_KEY not configured. Add it to your environment variables.",
         )
 
-    background_tasks.add_task(_lead_list_bg, deal_id, deal, segments)
+    training_notes      = body.get("training_notes", "")
+    lead_count_override = body.get("lead_count")
+
+    background_tasks.add_task(_lead_list_bg, deal_id, deal, segments, training_notes, lead_count_override)
     return {
         "agent":     "lead_list",
         "queued":    True,
@@ -279,13 +284,20 @@ async def run_lead_list_agent(deal_id: str, background_tasks: BackgroundTasks):
     }
 
 
-async def _lead_list_bg(deal_id: str, deal: dict, segments: list[dict]):
+async def _lead_list_bg(
+    deal_id: str,
+    deal: dict,
+    segments: list[dict],
+    training_notes: str = "",
+    lead_count_override=None,
+):
     from app.services.lead_list_agent import run_lead_list_agent
     from app.services.auto_pipeline import search_leads_across_segments
     from app.services.apollo import leads_to_csv
 
     await db._set_pipeline_step(deal_id, "apollo_search", "running")
     cfg = await db.get_pipeline_config()
+    target_count = int(lead_count_override) if lead_count_override else cfg["lead_count"]
     leads: list[dict] = []
     detail = ""
 
@@ -295,7 +307,8 @@ async def _lead_list_bg(deal_id: str, deal: dict, segments: list[dict]):
             segments         = segments,
             prospect_company = deal.get("company") or "",
             deal_id          = deal_id,
-            target_count     = cfg["lead_count"],
+            target_count     = target_count,
+            training_notes   = training_notes,
         )
         leads  = result["leads"]
         detail = (
@@ -310,7 +323,7 @@ async def _lead_list_bg(deal_id: str, deal: dict, segments: list[dict]):
     if not leads:
         try:
             logger.info("Agent 3 (direct fallback): searching %d segments for deal %s", len(segments), deal_id)
-            leads = await search_leads_across_segments(segments, total_limit=cfg["lead_count"])
+            leads = await search_leads_across_segments(segments, total_limit=target_count)
             detail = f"{len(leads)} leads via direct segment search"
             logger.info("Agent 3 (direct fallback) complete for deal %s: %d leads", deal_id, len(leads))
         except Exception as exc:
@@ -338,7 +351,7 @@ async def _lead_list_bg(deal_id: str, deal: dict, segments: list[dict]):
 # ── Agent 4: Email Draft ──────────────────────────────────────────────────────
 
 @router.post("/email/{deal_id}")
-async def run_email_draft_agent(deal_id: str, background_tasks: BackgroundTasks):
+async def run_email_draft_agent(deal_id: str, background_tasks: BackgroundTasks, body: dict = {}):
     """
     Agent 4 — Email Draft Agent.
     Generates a personalised delivery email using website intel, ICP context,
@@ -353,7 +366,8 @@ async def run_email_draft_agent(deal_id: str, background_tasks: BackgroundTasks)
     if not segments:
         raise HTTPException(status_code=400, detail="No ICP segments. Run ICP Agent first.")
 
-    background_tasks.add_task(_email_draft_bg, deal_id, deal, segments)
+    training_notes = body.get("training_notes", "")
+    background_tasks.add_task(_email_draft_bg, deal_id, deal, segments, training_notes)
     return {
         "agent":   "email_draft",
         "queued":  True,
@@ -362,7 +376,7 @@ async def run_email_draft_agent(deal_id: str, background_tasks: BackgroundTasks)
     }
 
 
-async def _email_draft_bg(deal_id: str, deal: dict, segments: list[dict]):
+async def _email_draft_bg(deal_id: str, deal: dict, segments: list[dict], training_notes: str = ""):
     from app.services.auto_pipeline import generate_delivery_email
     from app.models.schemas import ProspectData
     try:
@@ -379,7 +393,8 @@ async def _email_draft_bg(deal_id: str, deal: dict, segments: list[dict]):
         wi = website_intel if isinstance(website_intel, dict) else None
 
         draft = await generate_delivery_email(
-            prospect, segments, deal.get("reply_body") or "", lead_count, website_intel=wi
+            prospect, segments, deal.get("reply_body") or "", lead_count,
+            website_intel=wi, training_notes=training_notes,
         )
 
         pool = await db.get_pool()
@@ -477,8 +492,10 @@ async def run_pipeline_agent(deal_id: str, background_tasks: BackgroundTasks, bo
     if not deal:
         raise HTTPException(status_code=404, detail="Deal not found")
 
-    auto_send = bool(body.get("auto_send", True))
-    background_tasks.add_task(_pipeline_bg, deal_id, deal, auto_send)
+    auto_send           = bool(body.get("auto_send", True))
+    training_notes      = body.get("training_notes", "")
+    lead_count_override = body.get("lead_count")
+    background_tasks.add_task(_pipeline_bg, deal_id, deal, auto_send, training_notes, lead_count_override)
     return {
         "agent":     "pipeline",
         "queued":    True,
@@ -488,7 +505,13 @@ async def run_pipeline_agent(deal_id: str, background_tasks: BackgroundTasks, bo
     }
 
 
-async def _pipeline_bg(deal_id: str, deal: dict, auto_send: bool):
+async def _pipeline_bg(
+    deal_id: str,
+    deal: dict,
+    auto_send: bool,
+    training_notes: str = "",
+    lead_count_override=None,
+):
     """
     Full pipeline from scratch.
     Step 1: Website Intel (if not already successfully extracted)
@@ -541,6 +564,7 @@ async def _pipeline_bg(deal_id: str, deal: dict, auto_send: bool):
             deal.get("reply_body") or "",
             deal_id                = deal_id,
             existing_website_intel = existing_wi,
+            training_notes         = training_notes,
         )
         await db.set_deal_icp(deal_id, {"segments": segments})
         await db.advance_deal_stage(deal_id, "icp")
@@ -549,7 +573,13 @@ async def _pipeline_bg(deal_id: str, deal: dict, auto_send: bool):
 
         # ── Step 3: Leads → Email → Follow-ups ───────────────────────────────
         deal = await db.get_deal(deal_id) or deal
-        result = await run_auto_pipeline(deal_id, deal, auto_send=auto_send)
+        result = await run_auto_pipeline(
+            deal_id,
+            deal,
+            auto_send      = auto_send,
+            training_notes = training_notes,
+            lead_count_override = lead_count_override,
+        )
         logger.info(
             "Agent 6 (pipeline) complete for deal %s — leads=%d sent=%s",
             deal_id, result.get("lead_count", 0), result.get("sent"),

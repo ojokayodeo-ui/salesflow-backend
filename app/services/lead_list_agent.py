@@ -158,6 +158,7 @@ async def run_lead_list_agent(
     prospect_company: str = "",
     deal_id: str = "",
     target_count: int = 100,
+    training_notes: str = "",
 ) -> dict:
     """
     Run the Lead List Generation Agent.
@@ -203,6 +204,10 @@ async def run_lead_list_agent(
     seg_context = "\n\n".join(seg_lines)
 
     per_seg_target = max(25, target_count // min(len(segments), 3))
+    training_block = (
+        f"\n\nADDITIONAL INSTRUCTIONS FROM USER:\n{training_notes.strip()}"
+        if training_notes and training_notes.strip() else ""
+    )
     system = f"""You are the Lead List Generation Agent for PALM — a B2B outbound system.
 
 Your job: search Apollo.io to build a high-quality lead list for {prospect_company or 'the prospect'} using the ICP segments below.
@@ -222,7 +227,7 @@ QUALITY RULES:
 - If results for a segment are poor (wrong titles, irrelevant companies) after retry, skip it and note why.
 
 ICP SEGMENTS:
-{seg_context}
+{seg_context}{training_block}
 
 Begin by choosing which 3 segments to search, then execute the searches."""
 
