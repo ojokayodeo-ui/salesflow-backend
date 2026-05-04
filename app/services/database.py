@@ -1364,20 +1364,24 @@ async def get_all_open_rates() -> dict:
         },
     }
 
+
+
+async def get_email_metrics(deal_id: str) -> dict:
+    """Return open/send metrics for a single deal."""
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT * FROM email_events WHERE deal_id=$1 ORDER BY sent_at DESC", deal_id
         )
-    events = [dict(r) for r in rows]
+    events   = [dict(r) for r in rows]
     sent     = [e for e in events if e["direction"] == "sent"]
     received = [e for e in events if e["direction"] == "received"]
     return {
-        "sent_count":    len(sent),
+        "sent_count":     len(sent),
         "received_count": len(received),
-        "total_opens":   sum(e.get("open_count", 0) for e in sent),
-        "opened_count":  sum(1 for e in sent if (e.get("open_count") or 0) > 0),
-        "last_sent":     sent[0]["sent_at"] if sent else None,
-        "last_received": received[0]["sent_at"] if received else None,
-        "events":        events[:20],
+        "total_opens":    sum(e.get("open_count", 0) for e in sent),
+        "opened_count":   sum(1 for e in sent if (e.get("open_count") or 0) > 0),
+        "last_sent":      sent[0]["sent_at"] if sent else None,
+        "last_received":  received[0]["sent_at"] if received else None,
+        "events":         events[:20],
     }

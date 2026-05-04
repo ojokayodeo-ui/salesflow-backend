@@ -105,6 +105,7 @@ async def process_due_emails():
                 body              = email["step_body"],
                 csv_data          = None,
                 csv_filename      = "",
+                deal_id           = email["deal_id"],
                 extra_attachments = extra_attachments,
             )
 
