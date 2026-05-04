@@ -33,9 +33,9 @@ TOOLS = [
         "name": "search_apollo",
         "description": (
             "Search Apollo.io for B2B contacts matching the given criteria. "
-            "Call once per ICP segment. Returns real contacts with verified emails. "
+            "Call once per ICP segment. The export will contain only verified emails. "
             "Each call is an API credit — be specific to maximise quality. "
-            "You can retry a segment with looser filters if results are poor."
+            "If results are 0, retry with fewer filters (drop industries or keywords first, then employee range)."
         ),
         "input_schema": {
             "type": "object",
@@ -44,35 +44,45 @@ TOOLS = [
                     "type": "string",
                     "description": "ICP segment label (used for tracking which segment each lead came from)"
                 },
-                "person_titles": {
+                "job_titles": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Job titles to target. Use exact Apollo-style titles e.g. 'Managing Director', 'Head of Sales', 'Founder'"
+                    "description": "Exact Apollo-style job titles e.g. ['Managing Director', 'Head of Sales', 'Founder']. Use 3-5 titles."
                 },
-                "person_locations": {
+                "seniority_levels": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Countries or cities e.g. ['United Kingdom'] or ['London', 'Manchester', 'Birmingham']"
+                    "description": "Apollo seniority values — use ONLY: 'owner', 'founder', 'c_suite', 'partner', 'vp', 'head', 'director', 'manager', 'senior', 'entry', 'intern'. Pick 2-4."
                 },
-                "employee_min": {
-                    "type": "integer",
-                    "description": "Minimum employee count at target company (omit if not relevant)"
+                "industries": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Industry names as Apollo labels them e.g. ['Management Consulting', 'Staffing and Recruiting', 'Financial Services']. Use 1-3. Drop this filter first if results are 0."
                 },
-                "employee_max": {
-                    "type": "integer",
-                    "description": "Maximum employee count at target company (omit if not relevant)"
+                "company_size": {
+                    "type": "object",
+                    "description": "Employee count range for target companies",
+                    "properties": {
+                        "min": {"type": "integer", "description": "Minimum employees"},
+                        "max": {"type": "integer", "description": "Maximum employees"}
+                    }
+                },
+                "locations": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Country names e.g. ['United Kingdom', 'Ireland']. Use exact country names Apollo expects."
                 },
                 "keywords": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Industry/sector keyword tags e.g. ['consulting', 'recruitment', 'SaaS']. Use sparingly — over-filtering reduces results."
+                    "description": "Additional keyword tags for company matching. Use 1-3 max — over-filtering reduces results. Drop this if results are low."
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Max contacts to fetch (10-50). Default 30. Use 50 only for the strongest segment."
+                    "description": "Max contacts to fetch (10-50). Default 30."
                 }
             },
-            "required": ["segment_name", "person_titles", "person_locations"]
+            "required": ["segment_name", "job_titles", "locations"]
         }
     },
     {
@@ -105,51 +115,69 @@ TOOLS = [
 
 
 async def _execute_apollo_search(
-    person_titles: list[str],
-    person_locations: list[str],
-    employee_min: int | None,
-    employee_max: int | None,
-    keywords: list[str] | None,
-    limit: int,
+    job_titles: list[str],
+    locations: list[str],
+    seniority_levels: list[str] | None = None,
+    industries: list[str] | None = None,
+    employee_min: int | None = None,
+    employee_max: int | None = None,
+    keywords: list[str] | None = None,
+    limit: int = 30,
 ) -> tuple[list[dict], int]:
     """
-    Execute a real Apollo.io API search.
-    Returns (leads_with_email, total_available).
+    Execute a real Apollo.io API search using the 6 core filter dimensions.
+    No email-status filter on search — contacts are revealed via people/match.
+    Only verified emails survive into the final export.
+    Returns (leads_with_verified_email, total_available).
     """
-    from app.services.apollo import _make_headers, _apollo_search, _build_lead
+    from app.services.apollo import _make_headers, _apollo_search
 
     headers = _make_headers()
 
-    # Start broad: verified + likely_to_engage; reveal emails via people/match
+    # Build keyword tag list: industries + extra keywords
+    keyword_tags = []
+    if industries:
+        keyword_tags.extend(industries[:3])
+    if keywords:
+        keyword_tags.extend(keywords[:3])
+
     payload: dict = {
-        "per_page":               min(limit, 50),
-        "page":                   1,
-        "person_titles[]":        person_titles[:5],
-        "person_locations[]":     person_locations,
-        "contact_email_status[]": ["verified"],
+        "per_page":           min(limit, 50),
+        "page":               1,
+        "person_titles[]":    job_titles[:5],
+        "person_locations[]": locations,
     }
+
+    if seniority_levels:
+        payload["person_seniorities[]"] = seniority_levels[:4]
 
     if employee_min and employee_max and 0 < employee_min < employee_max <= 50000:
         payload["organization_num_employees_ranges[]"] = [f"{employee_min},{employee_max}"]
 
-    if keywords:
-        payload["q_organization_keyword_tags[]"] = keywords[:5]
+    if keyword_tags:
+        payload["q_organization_keyword_tags[]"] = keyword_tags[:6]
 
     leads, total = await _apollo_search(payload, headers, max_reveal=limit)
 
-    # Retry 1: drop employee range
-    if not leads and (employee_min or employee_max):
-        logger.info("Apollo agentic: retrying without employee range")
-        payload.pop("organization_num_employees_ranges[]", None)
-        leads, total = await _apollo_search(payload, headers, max_reveal=limit)
-
-    # Retry 2: drop keywords too
-    if not leads and keywords:
-        logger.info("Apollo agentic: retrying without keywords")
+    # Retry 1: drop industry/keyword tags
+    if not leads and keyword_tags:
+        logger.info("Apollo: retrying without keyword/industry tags")
         payload.pop("q_organization_keyword_tags[]", None)
         leads, total = await _apollo_search(payload, headers, max_reveal=limit)
 
-    logger.info("Apollo agentic search complete: %d leads (total available: %s)", len(leads), total)
+    # Retry 2: drop employee range too
+    if not leads and (employee_min or employee_max):
+        logger.info("Apollo: retrying without employee range")
+        payload.pop("organization_num_employees_ranges[]", None)
+        leads, total = await _apollo_search(payload, headers, max_reveal=limit)
+
+    # Retry 3: drop seniority too (titles + location only)
+    if not leads and seniority_levels:
+        logger.info("Apollo: retrying with titles + location only")
+        payload.pop("person_seniorities[]", None)
+        leads, total = await _apollo_search(payload, headers, max_reveal=limit)
+
+    logger.info("Apollo search complete: %d verified leads (total available: %s)", len(leads), total)
     return leads, total
 
 
@@ -188,18 +216,21 @@ async def run_lead_list_agent(
     # Build segment context for the agent
     seg_lines = []
     for i, seg in enumerate(segments[:5], 1):
+        titles     = seg.get("job_titles") or seg.get("target_titles") or []
+        seniority  = seg.get("seniority_levels") or []
+        industries = seg.get("industries") or ([seg["industry"]] if seg.get("industry") else [])
+        locations  = seg.get("locations") or ([seg["hq_country"]] if seg.get("hq_country") else ["United Kingdom"])
         seg_lines.append(
             f"Segment {i} — {seg.get('segment_name', f'Segment {i}')}\n"
-            f"  Industry:      {seg.get('industry', 'not specified')}\n"
-            f"  Sub-niche:     {seg.get('sub_niche', '')}\n"
-            f"  Titles:        {', '.join(seg.get('target_titles') or [])}\n"
-            f"  Alt titles:    {', '.join(seg.get('secondary_titles') or [])}\n"
-            f"  Company size:  {seg.get('company_size', 'any')} "
+            f"  Job titles:      {', '.join(titles)}\n"
+            f"  Seniority:       {', '.join(seniority) or 'not specified'}\n"
+            f"  Industries:      {', '.join(industries)}\n"
+            f"  Company size:    {seg.get('company_size', 'any')} "
             f"(min={seg.get('employee_min', '')}, max={seg.get('employee_max', '')})\n"
-            f"  Location:      {seg.get('hq_country', 'United Kingdom')}\n"
-            f"  Keywords:      {', '.join(seg.get('keywords') or [])}\n"
-            f"  Pain point:    {seg.get('pain_point', '')}\n"
-            f"  Buying signal: {seg.get('buying_signal', '')}"
+            f"  Locations:       {', '.join(locations)}\n"
+            f"  Keywords:        {', '.join(seg.get('keywords') or [])}\n"
+            f"  Pain point:      {seg.get('pain_point', '')}\n"
+            f"  Buying signal:   {seg.get('buying_signal', '')}"
         )
     seg_context = "\n\n".join(seg_lines)
 
@@ -225,17 +256,25 @@ Your job: search Apollo.io to build a high-quality lead list for {prospect_compa
 
 STRATEGY:
 - You have {len(segments)} ICP segments. Choose the 3 with the clearest, most searchable targeting data.
-- For each chosen segment, call search_apollo with filters derived directly from the segment.
-- Map segment data to Apollo parameters: titles → person_titles, location → person_locations, employee range → employee_min/max, keywords → keywords (use sparingly).
-- If a search returns fewer than 10 leads, consider relaxing filters (remove keywords or employee range) and try again.
+- For each chosen segment, call search_apollo using all 6 filter dimensions from the segment:
+    job_titles       → exact Apollo-style titles (3-5 titles)
+    seniority_levels → Apollo seniority values: owner, founder, c_suite, partner, vp, head, director, manager, senior
+    industries       → industry names as Apollo labels them (1-3)
+    company_size     → {{ "min": X, "max": Y }} from employee range
+    locations        → country names (default: United Kingdom)
+    keywords         → extra keyword tags (1-3, use sparingly)
 - Target {per_seg_target} leads per segment. Total goal: {target_count} unique verified leads.
 - After searching your chosen segments, call finalize_leads with your summary.
 
 QUALITY RULES:
-- Only contacts with VERIFIED email status are included. Catch-all, unverified, and likely_to_engage are all excluded.
-- If a search returns 0 results, retry with fewer filters: first remove keywords, then remove employee range.
+- The search is broad — email reveal runs automatically. Only VERIFIED emails make the final export.
+- If a search returns 0 results, retry with fewer filters in this order:
+    1. Drop keywords
+    2. Drop industries
+    3. Drop company_size
+    4. Drop seniority_levels (titles + location only as last resort)
+- If a segment still returns 0 after all retries, skip it and note why.
 - Prioritise relevance over volume. A tight list of 80 well-targeted leads beats 200 generic ones.
-- If results for a segment are poor (wrong titles, irrelevant companies) after retry, skip it and note why.
 
 ICP SEGMENTS:
 {seg_context}{swipe_block}{training_block}
@@ -300,27 +339,32 @@ Begin by choosing which 3 segments to search, then execute the searches."""
 
             # ── search_apollo ────────────────────────────────────────────────
             if tool_name == "search_apollo":
-                seg_name = tool_input.get("segment_name", f"Segment {searches_performed + 1}")
-                titles   = tool_input.get("person_titles", [])
-                locs     = tool_input.get("person_locations", ["United Kingdom"])
-                emp_min  = tool_input.get("employee_min")
-                emp_max  = tool_input.get("employee_max")
-                kws      = tool_input.get("keywords", [])
-                limit    = min(int(tool_input.get("limit") or 30), 50)
+                seg_name    = tool_input.get("segment_name", f"Segment {searches_performed + 1}")
+                titles      = tool_input.get("job_titles", tool_input.get("person_titles", []))
+                locs        = tool_input.get("locations", tool_input.get("person_locations", ["United Kingdom"]))
+                seniorities = tool_input.get("seniority_levels", [])
+                industries  = tool_input.get("industries", [])
+                size        = tool_input.get("company_size", {})
+                emp_min     = size.get("min") if isinstance(size, dict) else tool_input.get("employee_min")
+                emp_max     = size.get("max") if isinstance(size, dict) else tool_input.get("employee_max")
+                kws         = tool_input.get("keywords", [])
+                limit       = min(int(tool_input.get("limit") or 30), 50)
 
                 logger.info(
-                    "Lead agent [turn %d]: searching '%s' — titles=%s loc=%s emp=%s-%s kw=%s limit=%d",
-                    turn + 1, seg_name, titles, locs, emp_min, emp_max, kws, limit,
+                    "Lead agent [turn %d]: searching '%s' — titles=%s seniority=%s industries=%s loc=%s emp=%s-%s kw=%s limit=%d",
+                    turn + 1, seg_name, titles, seniorities, industries, locs, emp_min, emp_max, kws, limit,
                 )
 
                 try:
                     leads, total_available = await _execute_apollo_search(
-                        person_titles   = titles,
-                        person_locations= locs,
-                        employee_min    = emp_min,
-                        employee_max    = emp_max,
-                        keywords        = kws,
-                        limit           = limit,
+                        job_titles       = titles,
+                        locations        = locs,
+                        seniority_levels = seniorities,
+                        industries       = industries,
+                        employee_min     = emp_min,
+                        employee_max     = emp_max,
+                        keywords         = kws,
+                        limit            = limit,
                     )
                     searches_performed += 1
 

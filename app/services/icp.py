@@ -222,6 +222,10 @@ CRITICAL RULES:
 7. Be hyper-specific: "Ecommerce founders running 1M-10M Shopify brands" beats "online retailers".
 8. Never use em dashes. Use a regular hyphen (-) or rewrite the sentence.
 9. If a field has no real data to support it, use the closest evidenced inference and note it in reply_signal.
+10. For seniority_levels use ONLY these exact Apollo values: "owner", "founder", "c_suite", "partner", "vp", "head", "director", "manager", "senior", "entry", "intern". Pick 2-4 that match the segment.
+11. For job_titles use exact Apollo-style titles (e.g. "Managing Director", not "MD"). List 3-5 specific titles.
+12. For industries list 1-3 specific industry names as Apollo would label them (e.g. "Staffing and Recruiting", "Management Consulting", "Financial Services").
+13. For locations list country names as Apollo expects them (e.g. "United Kingdom", "Ireland"). Default to UK unless data indicates otherwise.
 
 {prospect_context}{swipe_block}
 
@@ -234,17 +238,21 @@ IMPORTANT: Never use em dashes in any text values.{training_block}
       "segment_number": 1,
       "segment_name": "Short specific name e.g. NHS Procurement Directors",
       "reply_signal": "Quote or paraphrase from the reply that led to this segment (or 'inferred from website' / 'inferred from profile')",
-      "industry": "Primary industry",
+      "industry": "Primary industry (display label)",
       "sub_niche": "Specific sub-niche",
       "company_size": "e.g. 10-50 employees",
       "employee_min": 10,
       "employee_max": 50,
       "hq_country": "e.g. United Kingdom",
-      "target_titles": ["Title 1", "Title 2", "Title 3"],
-      "secondary_titles": ["Alt Title 1", "Alt Title 2"],
+      "job_titles": ["Managing Director", "CEO", "Founder"],
+      "seniority_levels": ["owner", "founder", "c_suite", "director"],
+      "industries": ["Management Consulting", "Business Services"],
+      "locations": ["United Kingdom"],
+      "keywords": ["consulting", "B2B", "advisory"],
+      "target_titles": ["Managing Director", "CEO", "Founder"],
+      "secondary_titles": ["Director", "Owner"],
       "pain_point": "The single most pressing pain this segment faces that the prospect can solve",
       "buying_signal": "The clearest signal that a company in this segment needs help right now",
-      "keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
       "cold_email_hook": "One punchy sentence that would grab this audience's attention",
       "apollo_prompt": "A 2-3 sentence plain English description to paste into Apollo AI search. Include job titles, industry, company size, location, and specific characteristics."
     }},

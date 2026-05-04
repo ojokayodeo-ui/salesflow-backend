@@ -30,13 +30,17 @@ def _make_headers() -> dict:
     }
 
 
-def _build_lead(p: dict) -> dict | None:
-    """Convert raw Apollo person dict to our lead dict. Returns None if no email."""
+def _build_lead(p: dict, verified_only: bool = True) -> dict | None:
+    """Convert raw Apollo person dict to our lead dict.
+    verified_only=True (default): only export contacts with verified emails.
+    """
     email = (p.get("email") or "").strip()
     if not email:
         return None
     es = (p.get("email_status") or "").lower()
-    if es not in ("verified", ""):
+    if verified_only and es not in ("verified", ""):
+        return None
+    if not verified_only and es in ("invalid", "notfound"):
         return None
 
     # Apollo returns org data under "organization" (search) or "employment_history"
@@ -201,47 +205,67 @@ async def _apollo_search(
     # Reveal emails for contacts that don't have one yet
     people = await _reveal_emails_batch(people, headers, max_reveal=max_reveal)
 
-    leads = [l for l in (_build_lead(p) for p in people) if l]
+    # Only export contacts with verified emails
+    leads = [l for l in (_build_lead(p, verified_only=True) for p in people) if l]
     return leads, total
 
 
 async def search_leads(icp: ICPData, limit: int = 100) -> list[dict]:
     """
     Search Apollo.io for contacts matching the ICP and reveal their emails.
+    Uses all 6 filter dimensions. No email-status filter on search —
+    contacts are revealed via people/match; only verified survive export.
     """
     if not settings.apollo_api_key:
         logger.warning("APOLLO_API_KEY not set — skipping lead search")
         return []
 
-    titles  = (icp.target_titles or [])[:3] or ["Managing Director", "CEO", "Founder"]
-    country = icp.hq_country or "United Kingdom"
-    emp_min = icp.apollo_employee_min or 0
-    emp_max = icp.apollo_employee_max or 0
+    titles     = (icp.target_titles or [])[:5] or ["Managing Director", "CEO", "Founder"]
+    locations  = icp.locations or [icp.hq_country or "United Kingdom"]
+    emp_min    = icp.apollo_employee_min or 0
+    emp_max    = icp.apollo_employee_max or 0
 
-    payload = {
-        "per_page":               min(limit, 50),
-        "page":                   1,
-        "person_titles[]":        titles,
-        "person_locations[]":     [country],
-        "contact_email_status[]": ["verified"],
+    # Combine industries + keywords into keyword tags
+    keyword_tags = []
+    if icp.industries:
+        keyword_tags.extend(icp.industries[:3])
+    if icp.keywords:
+        keyword_tags.extend(icp.keywords[:3])
+
+    payload: dict = {
+        "per_page":           min(limit, 50),
+        "page":               1,
+        "person_titles[]":    titles,
+        "person_locations[]": locations,
     }
+    if icp.seniority_levels:
+        payload["person_seniorities[]"] = icp.seniority_levels[:4]
     if emp_min > 0 and emp_max > 0 and emp_max <= 10000:
         payload["organization_num_employees_ranges[]"] = [f"{emp_min},{emp_max}"]
+    if keyword_tags:
+        payload["q_organization_keyword_tags[]"] = keyword_tags[:6]
 
     headers = _make_headers()
-    logger.info("Apollo search — titles: %s | country: %s | employees: %s-%s",
-                titles, country, emp_min or "any", emp_max or "any")
+    logger.info(
+        "Apollo search — titles: %s | seniority: %s | industries: %s | loc: %s | emp: %s-%s | kw: %s",
+        titles, icp.seniority_levels, icp.industries, locations,
+        emp_min or "any", emp_max or "any", keyword_tags,
+    )
 
     try:
         leads, _ = await _apollo_search(payload, headers, max_reveal=min(limit, 30))
 
-        # Retry without employee range if still nothing
+        if not leads and keyword_tags:
+            logger.info("Apollo: retrying without keyword/industry tags")
+            payload.pop("q_organization_keyword_tags[]", None)
+            leads, _ = await _apollo_search(payload, headers, max_reveal=min(limit, 30))
+
         if not leads and (emp_min or emp_max):
             logger.info("Apollo: retrying without employee range")
             payload.pop("organization_num_employees_ranges[]", None)
             leads, _ = await _apollo_search(payload, headers, max_reveal=min(limit, 30))
 
-        logger.info("Apollo: %d leads with emails", len(leads))
+        logger.info("Apollo: %d verified leads", len(leads))
         return leads[:limit]
 
     except httpx.HTTPStatusError as exc:

@@ -168,6 +168,10 @@ class ICPData(BaseModel):
     apollo_employee_max: int
     company_age_years:   str
     buying_signal:       str
+    # Apollo search filters
+    seniority_levels:    Optional[List[str]] = None   # e.g. ["owner","founder","c_suite","director"]
+    industries:          Optional[List[str]] = None   # e.g. ["Management Consulting","Staffing"]
+    locations:           Optional[List[str]] = None   # e.g. ["United Kingdom","Ireland"]
     # Optional enriched fields
     revenue_range:       Optional[str] = None
     secondary_titles:    Optional[List[str]] = None
