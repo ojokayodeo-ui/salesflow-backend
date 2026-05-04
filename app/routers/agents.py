@@ -130,10 +130,10 @@ async def agent_status(deal_id: str):
 # ── Agent 1: Website Intel ────────────────────────────────────────────────────
 
 @router.post("/website-intel/{deal_id}")
-async def run_website_intel_agent(deal_id: str, background_tasks: BackgroundTasks):
+async def run_website_intel_agent(deal_id: str, background_tasks: BackgroundTasks, body: dict = {}):
     """
     Agent 1 — Website Intel Agent.
-    Crawls up to 6 page types and extracts structured intelligence via Claude.
+    Uses Perplexity.ai (if configured) as primary research source, falls back to web crawl.
     """
     deal = await db.get_deal(deal_id)
     if not deal:
@@ -771,5 +771,27 @@ async def debug_apollo_connection():
             "sample":                sample,
             "api_key_prefix":        settings.apollo_api_key[:6] + "..." if settings.apollo_api_key else "",
         }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@router.get("/debug/perplexity")
+async def debug_perplexity_connection():
+    """Quick test of Perplexity.ai connection."""
+    if not settings.perplexity_api_key:
+        return {"ok": False, "error": "PERPLEXITY_API_KEY is not set in environment"}
+    try:
+        from app.services.perplexity_intel import research_company_with_perplexity
+        result = await research_company_with_perplexity(
+            "https://anthropic.com", "Anthropic"
+        )
+        if result and result.get("status") == "success":
+            return {
+                "ok": True,
+                "api_key_prefix": settings.perplexity_api_key[:8] + "...",
+                "industry":       result.get("industry", ""),
+                "services":       str(result.get("services", ""))[:100],
+            }
+        return {"ok": False, "error": "No result returned from Perplexity"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}

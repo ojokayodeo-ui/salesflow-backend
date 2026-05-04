@@ -208,6 +208,17 @@ async def run_lead_list_agent(
         f"\n\nADDITIONAL INSTRUCTIONS FROM USER:\n{training_notes.strip()}"
         if training_notes and training_notes.strip() else ""
     )
+
+    # Load swipe files as targeting reference
+    swipe_block = ""
+    try:
+        from app.services.swipe_context import build_swipe_context
+        swipe_ctx = await build_swipe_context(limit=5, chars_per_file=600)
+        if swipe_ctx:
+            swipe_block = "\n\n" + swipe_ctx
+    except Exception:
+        pass
+
     system = f"""You are the Lead List Generation Agent for PALM — a B2B outbound system.
 
 Your job: search Apollo.io to build a high-quality lead list for {prospect_company or 'the prospect'} using the ICP segments below.
@@ -227,7 +238,7 @@ QUALITY RULES:
 - If results for a segment are poor (wrong titles, irrelevant companies) after retry, skip it and note why.
 
 ICP SEGMENTS:
-{seg_context}{training_block}
+{seg_context}{swipe_block}{training_block}
 
 Begin by choosing which 3 segments to search, then execute the searches."""
 

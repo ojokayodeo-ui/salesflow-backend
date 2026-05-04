@@ -200,6 +200,16 @@ REPLY TEXT:
         if training_notes and training_notes.strip() else ""
     )
 
+    # Load swipe files as knowledge base
+    swipe_block = ""
+    try:
+        from app.services.swipe_context import build_swipe_context
+        swipe_block = await build_swipe_context(limit=8, chars_per_file=800)
+        if swipe_block:
+            swipe_block = "\n\n" + swipe_block
+    except Exception:
+        pass
+
     prompt = f"""You are a world-class B2B market segmentation expert. Generate 5 sharp, specific, actionable ICP segments for this prospect's outbound sales.
 
 CRITICAL RULES:
@@ -213,7 +223,7 @@ CRITICAL RULES:
 8. Never use em dashes. Use a regular hyphen (-) or rewrite the sentence.
 9. If a field has no real data to support it, use the closest evidenced inference and note it in reply_signal.
 
-{prospect_context}
+{prospect_context}{swipe_block}
 
 Return ONLY valid JSON - no markdown, no explanation, no fences.
 IMPORTANT: Never use em dashes in any text values.{training_block}

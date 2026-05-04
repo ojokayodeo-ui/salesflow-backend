@@ -144,6 +144,16 @@ async def generate_delivery_email(
         if training_notes and training_notes.strip() else ""
     )
 
+    # Load swipe files as style/knowledge reference
+    swipe_block = ""
+    try:
+        from app.services.swipe_context import build_swipe_context
+        swipe_block = await build_swipe_context(limit=6, chars_per_file=1000)
+        if swipe_block:
+            swipe_block = "\n\n" + swipe_block
+    except Exception:
+        pass
+
     prompt = f"""Write a professional lead delivery email from {sender} to {first_name} at {prospect.company}.
 
 Context (use ONLY this data - no hallucination):
@@ -157,7 +167,7 @@ Context (use ONLY this data - no hallucination):
 {wi_insight}
 
 ICP segments built:
-{seg_summary}
+{seg_summary}{swipe_block}
 
 Write an email that:
 1. Opens with one specific, genuine insight from their reply or business (not generic)

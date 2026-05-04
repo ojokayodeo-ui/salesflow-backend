@@ -139,14 +139,15 @@ _NOT_FOUND_RESULT = {
 
 async def extract_website_intel(website_url: str, company_name: str = "") -> dict:
     """
-    Crawl the website and use Claude to extract structured business intelligence.
+    Extract structured business intelligence for a company.
+
+    PRIMARY: Perplexity.ai Sonar (live web search — works even if site blocks crawlers).
+    FALLBACK: Direct multi-page website crawl + Claude extraction.
 
     Returns a dict with:
       status, industry, target_customers, services, value_proposition,
       positioning, keywords, key_clients_mentioned, geographic_focus,
       source_pages, raw_text_chars
-
-    All text fields are either explicitly extracted content or exactly "NOT FOUND".
     """
     if not website_url:
         logger.info("No website URL for '%s' — skipping website intel", company_name)
@@ -155,6 +156,23 @@ async def extract_website_intel(website_url: str, company_name: str = "") -> dic
         result["reason"] = "No website URL provided"
         return result
 
+    # ── Step 1: Try Perplexity.ai first ──────────────────────────────────────
+    from app.services.perplexity_intel import research_company_with_perplexity
+    try:
+        perp_result = await research_company_with_perplexity(website_url, company_name)
+        if perp_result and perp_result.get("status") == "success":
+            logger.info(
+                "Website intel for '%s' sourced from Perplexity.ai", company_name or website_url
+            )
+            return perp_result
+    except Exception as exc:
+        logger.warning(
+            "Perplexity research failed for %s — falling back to web crawl: %s",
+            website_url, exc,
+        )
+
+    # ── Step 2: Fall back to direct web crawl + Claude extraction ────────────
+    logger.info("Falling back to direct web crawl for %s", website_url)
     pages = await crawl_website(website_url)
 
     if not pages:
