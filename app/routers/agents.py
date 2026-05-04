@@ -23,7 +23,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-# ── Registry ──────────────────────────────────────────────────────────────────
+# ── Registry ──────────────────────────────────────────────────────────────────────────────
 
 AGENT_REGISTRY = [
     {
@@ -127,7 +127,7 @@ async def agent_status(deal_id: str):
     }
 
 
-# ── Agent 1: Website Intel ────────────────────────────────────────────────────
+# ── Agent 1: Website Intel ───────────────────────────────────────────────────────────────────────────
 
 @router.post("/website-intel/{deal_id}")
 async def run_website_intel_agent(deal_id: str, background_tasks: BackgroundTasks, body: dict = {}):
@@ -174,7 +174,7 @@ async def _website_intel_bg(deal_id: str, website_url: str, company_name: str):
         logger.exception("Agent 1 (website intel) failed for deal %s", deal_id)
 
 
-# ── Agent 2: ICP Generation ───────────────────────────────────────────────────
+# ── Agent 2: ICP Generation ─────────────────────────────────────────────────────────────────────────
 
 @router.post("/icp/{deal_id}")
 async def run_icp_agent(deal_id: str, background_tasks: BackgroundTasks, body: dict = {}):
@@ -237,7 +237,7 @@ async def _icp_bg(deal_id: str, deal: dict, training_notes: str = ""):
         logger.exception("Agent 2 (ICP) failed for deal %s", deal_id)
 
 
-# ── Agent 3: Lead List (full agentic loop) ────────────────────────────────────
+# ── Agent 3: Lead List (full agentic loop) ───────────────────────────────────────────────────────
 
 @router.post("/leads/{deal_id}")
 async def run_lead_list_agent(deal_id: str, background_tasks: BackgroundTasks, body: dict = {}):
@@ -301,7 +301,7 @@ async def _lead_list_bg(
     leads: list[dict] = []
     detail = ""
 
-    # ── Try agentic approach first ────────────────────────────────────────────
+    # ── Try agentic approach first ──────────────────────────────────────────────────────────────────────────────
     try:
         result = await run_lead_list_agent(
             segments         = segments,
@@ -319,7 +319,7 @@ async def _lead_list_bg(
     except Exception as exc:
         logger.warning("Agent 3 agentic approach failed for deal %s: %s — falling back to direct search", deal_id, exc)
 
-    # ── Fallback: direct segment search if agentic returned nothing ───────────
+    # ── Fallback: direct segment search if agentic returned nothing ─────────────────────────────────────
     if not leads:
         try:
             logger.info("Agent 3 (direct fallback): searching %d segments for deal %s", len(segments), deal_id)
@@ -332,7 +332,7 @@ async def _lead_list_bg(
                                         f"Apollo search failed: {exc}")
             return
 
-    # ── Save results ──────────────────────────────────────────────────────────
+    # ── Save results ──────────────────────────────────────────────────────────────────────────────────────
     try:
         if leads:
             run_id = await db.start_pipeline_run(deal_id)
@@ -348,7 +348,7 @@ async def _lead_list_bg(
         await db._set_pipeline_step(deal_id, "apollo_search", "error", f"Save failed: {exc}")
 
 
-# ── Agent 4: Email Draft ──────────────────────────────────────────────────────
+# ── Agent 4: Email Draft ────────────────────────────────────────────────────────────────────────────
 
 @router.post("/email/{deal_id}")
 async def run_email_draft_agent(deal_id: str, background_tasks: BackgroundTasks, body: dict = {}):
@@ -423,7 +423,7 @@ async def _email_draft_bg(deal_id: str, deal: dict, segments: list[dict], traini
         await db._set_pipeline_step(deal_id, "email_draft", "error", "Agent failed — check logs")
 
 
-# ── Agent 5: Follow-up Sequence ───────────────────────────────────────────────
+# ── Agent 5: Follow-up Sequence ───────────────────────────────────────────────────────────────────────────
 
 @router.post("/followups/{deal_id}")
 async def run_followup_agent(deal_id: str, background_tasks: BackgroundTasks):
@@ -479,7 +479,7 @@ async def _followup_bg(deal_id: str, deal: dict, segments: list[dict]):
         await db._set_pipeline_step(deal_id, "followup_gen", "error", "Agent failed — check logs")
 
 
-# ── Agent 6: Pipeline Orchestrator ───────────────────────────────────────────
+# ── Agent 6: Pipeline Orchestrator ───────────────────────────────────────────────────────────────────────────
 
 @router.post("/pipeline/{deal_id}")
 async def run_pipeline_agent(deal_id: str, background_tasks: BackgroundTasks, body: dict = {}):
@@ -523,7 +523,7 @@ async def _pipeline_bg(
     from app.models.schemas import ProspectData
 
     try:
-        # ── Step 1: Website Intel ─────────────────────────────────────────────
+        # ── Step 1: Website Intel ─────────────────────────────────────────────────────────────────────────────
         stored_intel = deal.get("website_intel")
         has_intel    = isinstance(stored_intel, dict) and stored_intel.get("status") == "success"
 
@@ -540,7 +540,7 @@ async def _pipeline_bg(
             else:
                 await db._set_pipeline_step(deal_id, "website_extraction", "skipped", "no website URL")
 
-        # ── Step 2: ICP Generation ────────────────────────────────────────────
+        # ── Step 2: ICP Generation ─────────────────────────────────────────────────────────────────────────────
         await db._set_pipeline_step(deal_id, "icp_generation", "running")
         prospect = ProspectData(
             name         = deal.get("name", ""),
@@ -571,7 +571,7 @@ async def _pipeline_bg(
         await db._set_pipeline_step(deal_id, "icp_generation", "done", f"{len(segments)} segments")
         logger.info("Agent 6 step 2 (ICP) complete for deal %s: %d segments", deal_id, len(segments))
 
-        # ── Step 3: Leads → Email → Follow-ups ───────────────────────────────
+        # ── Step 3: Leads → Email → Follow-ups ───────────────────────────────────────────────────────────────────
         deal = await db.get_deal(deal_id) or deal
         result = await run_auto_pipeline(
             deal_id,
@@ -590,7 +590,7 @@ async def _pipeline_bg(
         await db._set_pipeline_step(deal_id, "icp_generation", "error", "Pipeline failed — check logs")
 
 
-# ── Agents Lab helpers ────────────────────────────────────────────────────────
+# ── Agents Lab helpers ────────────────────────────────────────────────────────────────────────────
 
 @router.post("/test-deal")
 async def create_test_deal(body: dict):
@@ -598,81 +598,87 @@ async def create_test_deal(body: dict):
     Create a quick test deal for the Agents Lab without needing Instantly.
     Returns existing deal if the email already has one.
     """
-    email = (body.get("email") or "").strip().lower()
-    if not email:
-        raise HTTPException(status_code=422, detail="email is required")
+    try:
+        email = (body.get("email") or "").strip().lower()
+        if not email:
+            raise HTTPException(status_code=422, detail="email is required")
 
-    existing = await db.get_deal_by_email(email)
-    if existing:
-        force_reset = body.get("force_reset", False)
-        if force_reset:
-            # Wipe all agent outputs so the deal can be run fresh
-            pool = await db.get_pool()
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    """UPDATE deals
-                       SET website_intel=NULL, icp_data=NULL, leads=NULL,
-                           delivery_email=NULL, follow_ups=NULL,
-                           pipeline_status=NULL, pipeline_steps=NULL,
-                           stage='new', updated_at=$1
-                       WHERE id=$2""",
-                    db.now_iso(), existing["id"],
-                )
-            logger.info("Test deal %s reset for fresh run", existing["id"])
+        existing = await db.get_deal_by_email(email)
+        if existing:
+            force_reset = body.get("force_reset", False)
+            if force_reset:
+                # Wipe all agent outputs so the deal can be run fresh
+                pool = await db.get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """UPDATE deals
+                           SET website_intel=NULL, icp_json=NULL,
+                               pipeline_status=NULL, followup_draft=NULL,
+                               stage='new', updated_at=$1
+                           WHERE id=$2""",
+                        db.now_iso(), existing["id"],
+                    )
+                    await conn.execute("DELETE FROM leads WHERE deal_id=$1", existing["id"])
+                logger.info("Test deal %s reset for fresh run", existing["id"])
+                return {
+                    "deal_id": existing["id"],
+                    "created": False,
+                    "reset":   True,
+                    "message": f"Deal reset — ready for a fresh run ({existing.get('company') or email})",
+                }
             return {
                 "deal_id": existing["id"],
                 "created": False,
-                "reset":   True,
-                "message": f"Deal reset — ready for a fresh run ({existing.get('company') or email})",
+                "message": f"Deal already exists for {existing.get('company') or email}",
             }
+
+        raw_name    = (body.get("name") or "").strip()
+        raw_company = (body.get("company") or "").strip()
+        website     = (body.get("website") or "").strip()
+        domain      = email.split("@")[1] if "@" in email else ""
+        name        = raw_name    or email.split("@")[0].replace(".", " ").title()
+        company     = raw_company or domain.split(".")[0].title()
+
+        deal = await db.create_deal(
+            name            = name,
+            email           = email,
+            company         = company,
+            domain          = domain,
+            campaign        = "Agents Lab Test",
+            reply_body      = body.get("reply") or "Yes, sounds interesting — tell me more about what you offer.",
+            job_title       = body.get("job_title") or "",
+            job_level       = "",
+            department      = "",
+            linkedin        = "",
+            location        = body.get("location") or "",
+            headcount       = "",
+            industry        = body.get("industry") or "",
+            sub_industry    = "",
+            company_website = website,
+            company_desc    = "",
+            headline        = "",
+            reply_subject   = "Re: Quick question",
+        )
+        deal_id = deal["id"]
+
+        # Auto-kick website extraction in background if URL provided —
+        # so intel is ready by the time the user hits Run on any agent
+        if website:
+            import asyncio as _asyncio
+            _asyncio.create_task(_website_intel_bg(deal_id, website, company))
+            logger.info("test-deal: website extraction queued for %s (%s)", company, website)
+
         return {
-            "deal_id": existing["id"],
-            "created": False,
-            "message": f"Deal already exists for {existing.get('company') or email}",
+            "deal_id": deal_id,
+            "created": True,
+            "message": f"Test deal created for {company}" + (" — extracting website intel..." if website else ""),
+            "website_extraction_queued": bool(website),
         }
-
-    raw_name    = (body.get("name") or "").strip()
-    raw_company = (body.get("company") or "").strip()
-    website     = (body.get("website") or "").strip()
-    domain      = email.split("@")[1] if "@" in email else ""
-    name        = raw_name    or email.split("@")[0].replace(".", " ").title()
-    company     = raw_company or domain.split(".")[0].title()
-
-    deal = await db.create_deal(
-        name            = name,
-        email           = email,
-        company         = company,
-        domain          = domain,
-        campaign        = "Agents Lab Test",
-        reply_body      = body.get("reply") or "Yes, sounds interesting — tell me more about what you offer.",
-        job_title       = body.get("job_title") or "",
-        job_level       = "",
-        department      = "",
-        linkedin        = "",
-        location        = body.get("location") or "",
-        headcount       = "",
-        industry        = body.get("industry") or "",
-        sub_industry    = "",
-        company_website = website,
-        company_desc    = "",
-        headline        = "",
-        reply_subject   = "Re: Quick question",
-    )
-    deal_id = deal["id"]
-
-    # Auto-kick website extraction in background if URL provided —
-    # so intel is ready by the time the user hits Run on any agent
-    if website:
-        import asyncio as _asyncio
-        _asyncio.create_task(_website_intel_bg(deal_id, website, company))
-        logger.info("test-deal: website extraction queued for %s (%s)", company, website)
-
-    return {
-        "deal_id": deal_id,
-        "created": True,
-        "message": f"Test deal created for {company}" + (" — extracting website intel..." if website else ""),
-        "website_extraction_queued": bool(website),
-    }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("create_test_deal failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Server error: {exc}")
 
 
 @router.get("/outputs/{deal_id}")
@@ -731,7 +737,7 @@ async def get_agent_outputs(deal_id: str):
     }
 
 
-# ── Apollo connection test ────────────────────────────────────────────────────
+# ── Apollo connection test ────────────────────────────────────────────────────────────────────────────
 
 @router.get("/debug/apollo")
 async def debug_apollo_connection():
@@ -747,8 +753,8 @@ async def debug_apollo_connection():
     payload = {
         "per_page": 5,
         "page":     1,
-        "person_titles[]":        ["Managing Director", "CEO", "Founder"],
-        "person_locations[]":     ["United Kingdom"],
+        "person_titles[]": ["Managing Director", "CEO", "Founder"],
+        "person_locations[]": ["United Kingdom"],
         "contact_email_status[]": ["verified", "likely_to_engage"],
     }
     headers = {
@@ -818,7 +824,7 @@ async def debug_perplexity_connection():
         return {"ok": False, "error": str(exc)}
 
 
-# ── Agent Configs (persistent training notes) ─────────────────────────────────
+# ── Agent Configs (persistent training notes) ───────────────────────────────────────────────────────
 
 @router.get("/configs")
 async def get_agent_configs():
