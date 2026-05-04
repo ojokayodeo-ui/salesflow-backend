@@ -17,7 +17,7 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# ── Connection ──────────────────────────────────────────────────────────────
+# ── Connection ──────────────────────────────────────────────────────────────────────────────
 
 _pool: Optional[asyncpg.Pool] = None
 
@@ -35,7 +35,7 @@ async def get_pool() -> asyncpg.Pool:
     return _pool
 
 
-# ── Schema ──────────────────────────────────────────────────────────────────
+# ── Schema ──────────────────────────────────────────────────────────────────────────────────
 
 CREATE_DEALS = """
 CREATE TABLE IF NOT EXISTS deals (
@@ -196,7 +196,7 @@ async def init_db():
     logger.info("PostgreSQL database ready")
 
 
-# ── Pipeline step helper (used by agents router) ─────────────────────────────
+# ── Pipeline step helper (used by agents router) ───────────────────────────────────────────────────
 
 async def _set_pipeline_step(deal_id: str, step: str, status: str, detail: str = ""):
     """Update a single step inside the pipeline_status JSON column."""
@@ -226,13 +226,23 @@ async def _set_pipeline_step(deal_id: str, step: str, status: str, detail: str =
         logger.warning("_set_pipeline_step failed for deal %s step %s: %s", deal_id, step, exc)
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────────────────────
 
 def _deal_row(row) -> dict:
     d = dict(row)
-    d["history"]    = json.loads(d.pop("history_json", "[]") or "[]")
-    d["icp"]          = json.loads(d["icp_json"])      if d.get("icp_json")      else None
-    d["website_intel"] = json.loads(d["website_intel"]) if d.get("website_intel") else None
+    try:
+        d["history"] = json.loads(d.pop("history_json", "[]") or "[]")
+    except (json.JSONDecodeError, TypeError):
+        d.pop("history_json", None)
+        d["history"] = []
+    try:
+        d["icp"] = json.loads(d["icp_json"]) if d.get("icp_json") else None
+    except (json.JSONDecodeError, TypeError):
+        d["icp"] = None
+    try:
+        d["website_intel"] = json.loads(d["website_intel"]) if d.get("website_intel") else None
+    except (json.JSONDecodeError, TypeError):
+        d["website_intel"] = None
     d["seq_active"] = bool(d.get("seq_active", 0))
     # Keep CRM stage in sync with sequence state so the frontend board is correct
     if d.get("seq_active"):
@@ -245,7 +255,7 @@ def _deal_row(row) -> dict:
     return d
 
 
-# ── Deals ──────────────────────────────────────────────────────────────────
+# ── Deals ──────────────────────────────────────────────────────────────────────────────────────
 
 async def get_deal_by_email(email: str):
     pool = await get_pool()
@@ -372,7 +382,7 @@ async def update_last_activity(deal_id: str):
         )
 
 
-# ── Analytics ──────────────────────────────────────────────────────────────
+# ── Analytics ──────────────────────────────────────────────────────────────────────────────────
 
 async def get_analytics() -> dict:
     pool = await get_pool()
@@ -444,7 +454,7 @@ async def get_idle_deals(days: int = 7) -> list[dict]:
     return [_deal_row(r) for r in rows]
 
 
-# ── Sequence management ─────────────────────────────────────────────────────
+# ── Sequence management ───────────────────────────────────────────────────────────────────────
 
 async def start_sequence(deal_id: str, seq_id: str, step: int = 1):
     pool = await get_pool()
@@ -492,7 +502,7 @@ async def get_active_sequences() -> list[dict]:
     return [_deal_row(r) for r in rows]
 
 
-# ── Pipeline runs ───────────────────────────────────────────────────────────
+# ── Pipeline runs ─────────────────────────────────────────────────────────────────────────────────────
 
 async def start_pipeline_run(deal_id: str) -> str:
     run_id = new_id()
@@ -523,7 +533,7 @@ async def finish_pipeline_run(run_id: str, status: str = "complete", error: str 
         )
 
 
-# ── Leads ───────────────────────────────────────────────────────────────────
+# ── Leads ───────────────────────────────────────────────────────────────────────────────────────
 
 async def save_leads(deal_id: str, run_id: str, leads: list[dict]):
     ts = now_iso()
@@ -570,7 +580,7 @@ async def bulk_set_lead_approval(deal_id: str, approved_ids: list[int]):
             )
 
 
-# ── Scheduled emails ─────────────────────────────────────────────────────────
+# ── Scheduled emails ─────────────────────────────────────────────────────────────────────────────────
 
 async def schedule_email(
     deal_id: str, seq_id: str, step_index: int,
@@ -641,7 +651,7 @@ async def get_scheduled_emails_for_deal(deal_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-# ── Extra Tables ────────────────────────────────────────────────────────────
+# ── Extra Tables ──────────────────────────────────────────────────────────────────────────────────
 
 CREATE_NOTES = """
 CREATE TABLE IF NOT EXISTS deal_notes (
@@ -763,6 +773,7 @@ async def ensure_extra_tables():
         await conn.execute(CREATE_NURTURE_SEQ_STEPS)
         await conn.execute(CREATE_NURTURE_ENROLLMENTS)
         await conn.execute(CREATE_PIPELINE_CONFIG)
+        await conn.execute(CREATE_AGENT_CONFIGS)
         # Seed default row if table is empty
         await conn.execute(
             """INSERT INTO pipeline_config (id, lead_count, send_delay_seconds, updated_at)
@@ -770,11 +781,10 @@ async def ensure_extra_tables():
                ON CONFLICT (id) DO NOTHING""",
             now_iso(),
         )
-        await conn.execute(CREATE_AGENT_CONFIGS)
     logger.info("Extra tables ready")
 
 
-# ── Pipeline Config ───────────────────────────────────────────────────────────
+# ── Pipeline Config ─────────────────────────────────────────────────────────────────────────────────────
 
 async def get_pipeline_config() -> dict:
     """Return current pipeline automation settings."""
@@ -802,7 +812,7 @@ async def save_pipeline_config(lead_count: int, send_delay_seconds: int) -> dict
     return {"lead_count": lead_count, "send_delay_seconds": send_delay_seconds}
 
 
-# ── Agent Configs (persistent per-agent training notes) ──────────────────────
+# ── Agent Configs (persistent per-agent training notes) ────────────────────────────────────────────────
 
 async def get_all_agent_configs() -> dict:
     """Return all agent training notes as {agent_id: training_notes}."""
@@ -826,7 +836,7 @@ async def save_agent_config(agent_id: str, training_notes: str) -> dict:
     return {"agent_id": agent_id, "training_notes": training_notes.strip()}
 
 
-# ── Notes ────────────────────────────────────────────────────────────────────
+# ── Notes ────────────────────────────────────────────────────────────────────────────────────────
 
 async def add_note(deal_id: str, content: str) -> dict:
     note_id = new_id()
@@ -862,7 +872,7 @@ async def delete_note(note_id: str):
         await conn.execute("DELETE FROM deal_notes WHERE id=$1", note_id)
 
 
-# ── Drive Links ──────────────────────────────────────────────────────────────
+# ── Drive Links ──────────────────────────────────────────────────────────────────────────────────────
 
 async def add_drive_link(deal_id: str, label: str, url: str, file_type: str = "document") -> dict:
     link_id = new_id()
@@ -889,7 +899,7 @@ async def delete_drive_link(link_id: str):
         await conn.execute("DELETE FROM deal_drive_links WHERE id=$1", link_id)
 
 
-# ── Social Links ─────────────────────────────────────────────────────────────
+# ── Social Links ──────────────────────────────────────────────────────────────────────────────────────
 
 async def add_social_link(deal_id: str, platform: str, url: str, notes: str = "") -> dict:
     link_id = new_id()
@@ -925,7 +935,7 @@ async def delete_social_link(link_id: str):
         await conn.execute("DELETE FROM deal_social_links WHERE id=$1", link_id)
 
 
-# ── Pipeline Intelligence ─────────────────────────────────────────────────────
+# ── Pipeline Intelligence ─────────────────────────────────────────────────────────────────────────────
 
 async def get_pipeline_intelligence() -> dict:
     pool = await get_pool()
@@ -1020,7 +1030,7 @@ async def get_pipeline_intelligence() -> dict:
     }
 
 
-# ── Swipe Files ───────────────────────────────────────────────────────────────
+# ── Swipe Files ──────────────────────────────────────────────────────────────────────────────────────
 
 def _swipe_row(row) -> dict:
     d = dict(row)
@@ -1087,7 +1097,7 @@ async def delete_swipe_file(sf_id: str):
         await conn.execute("DELETE FROM swipe_files WHERE id=$1", sf_id)
 
 
-# ── Nurture Sequences ─────────────────────────────────────────────────────────
+# ── Nurture Sequences ─────────────────────────────────────────────────────────────────────────────────────
 
 def _seq_row(row) -> dict:
     return {
@@ -1300,7 +1310,7 @@ async def get_nurture_analytics() -> dict:
     }
 
 
-# ── Email Events (tracking) ──────────────────────────────────────────────────
+# ── Email Events (tracking) ────────────────────────────────────────────────────────────────────────────
 
 async def save_email_event(
     deal_id: str, token: str, direction: str, subject: str
