@@ -258,6 +258,9 @@ Return ONLY valid JSON (no markdown fences, no extra text):
     data["raw_text_chars"]  = total_chars
     if "keywords" not in data or not isinstance(data["keywords"], list):
         data["keywords"] = []
+    else:
+        # Claude sometimes puts "NOT FOUND" as an array item — strip those out
+        data["keywords"] = [k for k in data["keywords"] if k and str(k).upper() != "NOT FOUND"]
 
     logger.info(
         "Website intel extracted for '%s': %d page(s), industry=%s, services=%s",
